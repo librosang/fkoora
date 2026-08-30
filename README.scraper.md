@@ -65,6 +65,7 @@ The scraper picks the right page per date automatically:
 |---|---|
 | `date YYYY-MM-DD [--details]` | scrape one day; `--details` also fetches lineups/events/stats |
 | `backfill --from YYYY-MM-DD --to YYYY-MM-DD [--details]` | historical range; idempotent — safe to re-run after interruptions |
+| `bootstrap [--years-back N] [--days-ahead M] [--no-slow] [--no-details]` | **ONE-TIME slow historical walk** of the last N years + next M days; resumable — see below |
 | `upcoming [--days N]` | future fixtures for the next N days (default 14) |
 | `enrich [--date D \| --from D --to D]` | fetch details for already-stored matches that don't have them yet |
 | `standings <id>… [--major]` | scrape a competition's **league table + every round's matches** (EN+AR); `--major` does every major competition in the DB |
@@ -72,6 +73,52 @@ The scraper picks the right page per date automatically:
 | `stats` | row counts per table |
 | `serve [--port N] [--host H]` | launch the **local web view** (kooora-style, mobile-first) |
 | `cache-crests` | pre-download every team crest & competition logo into `crest_cache/` |
+
+### `bootstrap` — one-time historical baseline
+
+The `bootstrap` command is the recommended way to seed a fresh database
+with a complete historical baseline that **never needs to be re-scraped**,
+plus a forward fixture window that becomes the starting point for the
+daily updater.
+
+```bash
+# One-time, slow, polite walk of the last 10 years + next 1 year.
+# Listings (EN+AR) for every day, plus details for major-competition
+# matches. Re-run any time to resume from where it left off.
+python -m scraper.cli bootstrap
+
+# Same thing, detached so it survives the shell (logs to bootstrap.log):
+./scripts/bootstrap_historical.sh
+```
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--years-back N` | `10` | how many years into the past to walk, day-by-day starting from today |
+| `--days-ahead M` | `365` | how many days into the future to walk (fixtures become the seed for the daily updater) |
+| `--today YYYY-MM-DD` | today | anchor date for the walk (useful for reproducible runs) |
+| `--no-details` | off | listings only — skip the bilingual lineups/events/stats enrichment pass |
+| `--no-slow` | off | use the normal 1 s rate-limit profile instead of the slow 2.5 s + 1.5 s jitter one (NOT recommended for the first run) |
+| `--day-pause S` | `3.0` (slow) / `0` (fast) | seconds to sleep between consecutive days |
+| `--max-details N` | `200` | cap detail pages per day (prevents a single dense match day from dominating the walk) |
+| `--all` / `--leagues …` | major only | standard competition filter (see below) — applies to the enrichment pass |
+
+The walk is **fully resumable**: every date that already has a successful
+`scrape_runs` row of the matching mode (`run_mode='date'` for listings,
+`run_mode='details'` for enrichment) is skipped, so an interrupted run
+simply picks up where it left off when re-launched. Historical listings
+are absolute (scores never change), so a successful listing run for a past
+date is never re-scraped automatically.
+
+Walking order: the past window is traversed **newest-first** (today-1,
+today-2, …, today-10y) so the most recent data lands in the database
+first; the future window is traversed **oldest-first** (today, today+1,
+…, today+1y).
+
+Tuning the slow profile: edit `SLOW_RATE_LIMIT_DELAY`,
+`SLOW_RATE_LIMIT_JITTER`, `BOOTSTRAP_DAY_PAUSE_SEC` in
+`scraper/config.py`. The defaults (~3–4 s between requests, 3 s between
+days) keep a ~7300-request historical walk gentle enough to leave
+running unattended (~6 h for listings only, longer with `--details`).
 
 ### Competition filters (for `--details` / `enrich`)
 
@@ -103,6 +150,13 @@ editions.
 ### Typical workflows
 
 ```bash
+# ONE-TIME bootstrap on a fresh database: last 10 years back + next 1 year
+# forward, slow + resumable. Detached so it survives the shell.
+./scripts/bootstrap_historical.sh
+
+# Same thing in the foreground (if you want to watch progress):
+python -m scraper.cli bootstrap
+
 # full season backfill, listings only first (fast: ~2 requests per day)
 python -m scraper.cli backfill --from 2025-08-01 --to 2026-05-31
 
@@ -116,7 +170,82 @@ python -m scraper.cli upcoming --days 7
 
 Everything is **idempotent** — rows are upserted, re-scraping a date refreshes
 scores and fills missing columns without creating duplicates. Interrupted
-backfills resume where they left off.
+backfills (and the `bootstrap` walk) resume where they left off because the
+`scrape_runs` table already records each successful date.
+
+### Running the bootstrap on Docker container start
+
+The Docker image (`Dockerfile.api`) ships with an entrypoint
+(`docker-entrypoint.sh`) that can launch the historical bootstrap
+automatically when the container starts, **in parallel with the API** so the
+API can serve requests immediately.
+
+```bash
+# Build the image
+docker build -t fkoora-api -f Dockerfile.api .
+
+# Run with bootstrap on start (one-time walk of the last 10 years + next 1 year)
+docker run -d \
+  --name fkoora-api \
+  -p 9000:9000 \
+  -e FOOTBALL_DB_URL=postgresql://user:pass@host:5432/football \
+  -e BOOTSTRAP_ON_START=1 \
+  fkoora-api
+
+# Tail the bootstrap log:
+docker exec -it fkoora-api tail -f /app/bootstrap.log
+
+# Stop the bootstrap walk only (API keeps running):
+docker exec fkoora-api pkill -f 'scraper.cli bootstrap'
+```
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BOOTSTRAP_ON_START` | `0` | `1` to run the bootstrap walk on container start; `0` to skip |
+| `BOOTSTRAP_YEARS_BACK` | `10` | how many years into the past to walk (day-by-day from today) |
+| `BOOTSTRAP_DAYS_AHEAD` | `365` | how many days into the future to walk |
+| `BOOTSTRAP_NO_DETAILS` | `0` | `1` to skip the bilingual detail enrichment pass (listings only) |
+| `BOOTSTRAP_NO_SLOW` | `0` | `1` to use the normal 1 s rate-limit instead of the slow 2.5 s + 1.5 s jitter profile (NOT recommended for the first walk) |
+| `BOOTSTRAP_ALL` | `0` | `1` to enrich ALL competitions instead of just the majors (top-5 leagues + UEFA/AFCON/etc.) |
+| `BOOTSTRAP_FORCE` | `0` | `1` to re-run the walk even if the marker file exists (e.g. after expanding `BOOTSTRAP_YEARS_BACK`) |
+| `BOOTSTRAP_LOG` | `/app/bootstrap.log` | where the bootstrap writes its log |
+| `BOOTSTRAP_MARKER_PATH` | `/app/.bootstrap_complete` | marker file written on full completion; persist this on a volume if you want the "skip" behaviour to survive image rebuilds |
+| `GUNICORN_BIND` | `0.0.0.0:9000` | gunicorn bind address |
+| `GUNICORN_WORKERS` | `1` | gunicorn workers (keep at 1 — exactly one scrape scheduler is enforced via a Postgres advisory lock) |
+| `GUNICORN_THREADS` | `8` | gunicorn threads |
+| `GUNICORN_TIMEOUT` | `180` | gunicorn worker timeout (seconds) |
+
+**How the one-time walk works on Docker:**
+
+1. **First start** (`BOOTSTRAP_ON_START=1`, marker missing): the entrypoint
+   launches `python -m scraper.cli bootstrap` in the background, then execs
+   gunicorn as PID 1. The API starts serving immediately while the slow walk
+   runs in the background.
+2. **Container restart mid-walk**: the entrypoint launches the bootstrap
+   again. Because every successful date is recorded in `scrape_runs`, the
+   walk simply resumes where it left off (already-done dates are skipped).
+3. **Container restart after full completion**: the marker file exists, so
+   the entrypoint skips the bootstrap entirely — startup is instant.
+4. **Re-run after changing `BOOTSTRAP_YEARS_BACK`**: delete the marker file
+   inside the container (`docker exec fkoora-api rm /app/.bootstrap_complete`)
+   or set `BOOTSTRAP_FORCE=1` and restart the container. The walk will run
+   again, but already-done dates still get skipped (only the new range is
+   scraped).
+
+**Persisting the marker across rebuilds** (optional): mount a small volume
+on `/app` (or specifically `BOOTSTRAP_MARKER_PATH`) so the marker survives
+image rebuilds. Without this, a fresh container will re-scan the
+`scrape_runs` table on first start (cheap — ~4000 DB queries, no network),
+find every date already done, and exit in a few seconds.
+
+**Resource notes:** the bootstrap runs in its own Python process and shares
+the configured DB connection pool with the API. The slow profile (2.5 s +
+1.5 s jitter between requests, 3 s between days) keeps goal.com load
+modest. The API's own scheduler runs in a separate thread inside gunicorn
+and focuses on today's live scores; the bootstrap walk focuses on past
+dates plus the future window, so the two rarely collide. If they do,
+upserts are idempotent, so worst case is some duplicate work — never
+duplicate rows.
 
 ---
 

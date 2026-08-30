@@ -1,18 +1,39 @@
 # Flask JSON API (scraper/) - production image, served by gunicorn.
 #
 # Build context: repository root (needs requirements.txt + scraper/).
-#   docker build -t fkoora-api -f Dockerfile .
+#   docker build -t fkoora-api -f Dockerfile.api .
 #
 # Runtime configuration (environment):
 #   FOOTBALL_DB_URL          postgresql://user:pass@host:5432/db   (required)
+#
+#   ---- API scheduler ---------------------------------------------
 #   API_ENABLE_SCHEDULER     1 (default) - keep the DB fresh in-process
 #                            0 - external cron calls /api/cron/refresh
 #   API_CRON_SECRET          shared secret for /api/cron/refresh (empty = open)
 #   IMG_CACHE_DIR            crest/logo disk cache (default /app/img_cache)
 #
+#   ---- One-time historical bootstrap (runs in background) ------
+#   BOOTSTRAP_ON_START       1 - run `python -m scraper.cli bootstrap` in the
+#                            background on container start (parallel with the
+#                            API), 0 - skip (default 0)
+#   BOOTSTRAP_YEARS_BACK     years back to walk                   (default 10)
+#   BOOTSTRAP_DAYS_AHEAD     days forward to walk                 (default 365)
+#   BOOTSTRAP_NO_DETAILS     1 - listings only (no enrichment)    (default 0)
+#   BOOTSTRAP_NO_SLOW        1 - use normal 1s rate-limit         (default 0)
+#   BOOTSTRAP_ALL            1 - enrich ALL competitions          (default 0)
+#   BOOTSTRAP_FORCE          1 - re-run even if marker exists     (default 0)
+#   BOOTSTRAP_LOG            log file                            (default /app/bootstrap.log)
+#   BOOTSTRAP_MARKER_PATH    marker file                         (default /app/.bootstrap_complete)
+#
 # The schema is applied idempotently on first start (CREATE TABLE IF NOT
 # EXISTS inside scraper/db/schema.sql) - a fresh database needs no manual
 # setup step. First data arrives with the first scheduler tick.
+#
+# When BOOTSTRAP_ON_START=1, the historical walk runs ONCE on the first start,
+# in parallel with the API. The walk is fully resumable: an interrupted run
+# resumes where it left off on the next container start (because the
+# `scrape_runs` table records every successful date). On full completion a
+# marker file is written so subsequent restarts are instant.
 
 FROM python:3.12-slim
 
@@ -21,7 +42,10 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
   PYTHONUNBUFFERED=1 \
   PIP_NO_CACHE_DIR=1 \
-  IMG_CACHE_DIR=/app/img_cache
+  IMG_CACHE_DIR=/app/img_cache \
+  BOOTSTRAP_ON_START=0 \
+  BOOTSTRAP_YEARS_BACK=10 \
+  BOOTSTRAP_DAYS_AHEAD=365
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
@@ -29,24 +53,21 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Only the Python package ships in this image (schema.sql lives inside it).
 COPY scraper/ ./scraper/
 
+# Entrypoint that (optionally) launches the bootstrap in the background and
+# then execs gunicorn as PID 1.
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
 RUN mkdir -p /app/img_cache
 
 EXPOSE 9000
 
-# One worker on purpose: exactly one scheduler thread then scrapes goal.com
-# (multiple workers would duplicate every scrape and race on the same rows).
-# Long timeout: on-demand scrape/detail endpoints can legitimately be slow.
-CMD ["gunicorn", \
-  "--bind", "0.0.0.0:9000", \
-  "--workers", "1", \
-  "--threads", "8", \
-  "--timeout", "180", \
-  "--graceful-timeout", "30", \
-  "--access-logfile", "-", \
-  "--error-logfile", "-", \
-  "scraper.wsgi:app"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 
 # Deep healthcheck: /api/health opens a real DB connection and reports counts.
+# Note: during a fresh bootstrap the DB may be empty for the first few minutes
+# until the first day's listings land - the healthcheck still returns 200 OK
+# as long as the API process responds.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 \
   CMD python -c "import urllib.request,sys; \
   sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9000/api/health', timeout=4).status == 200 else 1)"
