@@ -248,9 +248,25 @@ gunzip -c /backups/fkoora-2026-08-29.sql.gz \
 
 ```bash
 cd /srv/compose/fkoora && git pull          # or copy the new files
+sh scripts/remove-legacy-seo-files.sh       # only needed when copying/unzipping over an older drop
 docker compose build fkoora-api fkoora-frontend
 docker compose up -d fkoora-api fkoora-frontend
 ```
+
+> **⚠ Upgrading by unzipping over an older tree?** Zip extraction ADDS and
+> OVERWRITES files but never DELETES files that the new version removed —
+> and leftovers break the Next.js build with `Conflicting route and
+> metadata/page` errors. The v4 SEO restructure removed these three files
+> (replaced by runtime route handlers):
+>
+> | Removed in v4 | Replaced by |
+> |---|---|
+> | `src/app/robots.ts` | `src/app/robots.txt/route.ts` |
+> | `src/app/sitemap.ts` | `src/app/sitemap.xml/route.ts` + `src/app/sitemaps/[name]/route.ts` |
+> | `src/app/match/[id]/page.tsx` | `src/app/match/[id]/route.ts` + `src/app/match/[id]/[slug]/page.tsx` |
+>
+> `sh scripts/remove-legacy-seo-files.sh` deletes them if present (safe to
+> run anytime); a plain `git pull` handles removals automatically.
 
 **Logs:**
 
