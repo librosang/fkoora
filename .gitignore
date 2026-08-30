@@ -37,4 +37,5 @@ next-env.d.ts
 /img_cache
 /examples
 /.venv
+/scraper
 /.next

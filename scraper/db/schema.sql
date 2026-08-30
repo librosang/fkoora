@@ -13,7 +13,19 @@
 --     fetched (see matches.detail_fetched_at).
 --   * The schema is applied idempotently on every start (CREATE TABLE IF NOT
 --     EXISTS), so a fresh database needs no manual setup step.
+--   * UPGRADES: the file is organised in three passes so that an existing
+--     database created by an older version is healed automatically:
+--       pass 1 - CREATE TABLE IF NOT EXISTS (creates only missing tables)
+--       pass 2 - ALTER TABLE ADD COLUMN IF NOT EXISTS (adds columns that
+--                appeared in newer versions to pre-existing tables)
+--       pass 3 - CREATE INDEX IF NOT EXISTS (after the columns exist)
+--     This ordering matters: indexes on new columns would fail if they ran
+--     before pass 2 on an old database.
 -- ============================================================================
+
+-- ===========================================================================
+-- PASS 1 - CREATE TABLE IF NOT EXISTS
+-- ===========================================================================
 
 -- ---------------------------------------------------------------------------
 -- Competitions (leagues & cups)
@@ -41,7 +53,6 @@ CREATE TABLE IF NOT EXISTS seasons (
     first_seen_at  TEXT NOT NULL,
     last_seen_at   TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_seasons_competition ON seasons(competition_id);
 
 -- ---------------------------------------------------------------------------
 -- Teams
@@ -56,8 +67,6 @@ CREATE TABLE IF NOT EXISTS teams (
     first_seen_at TEXT NOT NULL,
     last_seen_at  TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_teams_name_en ON teams(name_en);
-CREATE INDEX IF NOT EXISTS idx_teams_name_ar ON teams(name_ar);
 
 -- ---------------------------------------------------------------------------
 -- Players  (populated from lineups, events and scorer lists)
@@ -92,9 +101,6 @@ CREATE TABLE IF NOT EXISTS players (
     first_seen_at TEXT NOT NULL,
     last_seen_at  TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_players_name_en ON players(name_en);
-CREATE INDEX IF NOT EXISTS idx_players_name_ar ON players(name_ar);
-CREATE INDEX IF NOT EXISTS idx_players_current_club ON players(current_club_id);
 
 -- ---------------------------------------------------------------------------
 -- Player career entries
@@ -125,8 +131,6 @@ CREATE TABLE IF NOT EXISTS player_career_entries (
     sort_order      INTEGER,              -- provider-ordered (most recent first)
     UNIQUE(player_id, team_id, season_name, competition_id)
 );
-CREATE INDEX IF NOT EXISTS idx_player_career_player ON player_career_entries(player_id);
-CREATE INDEX IF NOT EXISTS idx_player_career_team ON player_career_entries(team_id);
 
 -- ---------------------------------------------------------------------------
 -- Venues (stadiums) - no provider ID, deduplicated by English name
@@ -186,14 +190,6 @@ CREATE TABLE IF NOT EXISTS matches (
     first_seen_at    TEXT NOT NULL,
     last_seen_at2    TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_matches_date        ON matches(match_date);
-CREATE INDEX IF NOT EXISTS idx_matches_listed_date ON matches(listed_date);
-CREATE INDEX IF NOT EXISTS idx_matches_kickoff     ON matches(kickoff_utc);
-CREATE INDEX IF NOT EXISTS idx_matches_competition ON matches(competition_id);
-CREATE INDEX IF NOT EXISTS idx_matches_gameset     ON matches(competition_id, gameset_id);
-CREATE INDEX IF NOT EXISTS idx_matches_status      ON matches(status);
-CREATE INDEX IF NOT EXISTS idx_matches_home_team   ON matches(home_team_id);
-CREATE INDEX IF NOT EXISTS idx_matches_away_team   ON matches(away_team_id);
 
 -- ---------------------------------------------------------------------------
 -- Match events (goals, cards, substitutions, period markers)
@@ -217,9 +213,6 @@ CREATE TABLE IF NOT EXISTS match_events (
     decision          TEXT,              -- VAR events: e.g. CANCELLED / CONFIRMED
     sort_order         INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_events_match  ON match_events(match_id);
-CREATE INDEX IF NOT EXISTS idx_events_player ON match_events(player_id);
-CREATE INDEX IF NOT EXISTS idx_events_type   ON match_events(event_type);
 
 -- ---------------------------------------------------------------------------
 -- Lineups (starting XI + bench, per match & team)
@@ -236,8 +229,6 @@ CREATE TABLE IF NOT EXISTS lineups (
     rating       DOUBLE PRECISION,      -- player match rating (0-10)
     PRIMARY KEY (match_id, team_id, player_id)
 );
-CREATE INDEX IF NOT EXISTS idx_lineups_player ON lineups(player_id);
-CREATE INDEX IF NOT EXISTS idx_lineups_team   ON lineups(team_id);
 
 -- ---------------------------------------------------------------------------
 -- Managers per match
@@ -302,7 +293,6 @@ CREATE TABLE IF NOT EXISTS standings (
     updated_at      TEXT,
     UNIQUE(competition_id, season_id, stage, table_name, position)
 );
-CREATE INDEX IF NOT EXISTS idx_standings_comp ON standings(competition_id, season_id, stage);
 
 -- ---------------------------------------------------------------------------
 -- Gamesets (rounds / matchdays of a competition, e.g. "Game Week 3")
@@ -362,3 +352,204 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
     started_at          TEXT,
     finished_at         TEXT
 );
+
+-- ===========================================================================
+-- PASS 2 - UPGRADE SAFETY NET
+--
+-- Adds every nullable (or defaulted) column introduced after the first
+-- release to any table that predates it. Core NOT NULL columns are absent
+-- on purpose: they have existed since the first schema and adding a NOT NULL
+-- column without a default to a populated table is illegal anyway.
+-- Every statement is IF NOT EXISTS, so running on a fresh database is a no-op.
+-- ===========================================================================
+
+ALTER TABLE competitions ADD COLUMN IF NOT EXISTS name_en       TEXT;
+ALTER TABLE competitions ADD COLUMN IF NOT EXISTS name_ar       TEXT;
+ALTER TABLE competitions ADD COLUMN IF NOT EXISTS area_name_en  TEXT;
+ALTER TABLE competitions ADD COLUMN IF NOT EXISTS area_name_ar  TEXT;
+ALTER TABLE competitions ADD COLUMN IF NOT EXISTS area_code     TEXT;
+ALTER TABLE competitions ADD COLUMN IF NOT EXISTS image_url     TEXT;
+
+ALTER TABLE seasons ADD COLUMN IF NOT EXISTS name      TEXT;
+ALTER TABLE seasons ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 0;
+
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS name_en       TEXT;
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS short_name_en TEXT;
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS name_ar       TEXT;
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS code          TEXT;
+ALTER TABLE teams ADD COLUMN IF NOT EXISTS crest_url     TEXT;
+
+ALTER TABLE players ADD COLUMN IF NOT EXISTS name_en       TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS name_ar       TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS image_url     TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS is_verified   INTEGER DEFAULT 0;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS full_name_en  TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS full_name_ar  TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS slug_en       TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS slug_ar       TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS position      TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS shirt_number  INTEGER;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS height_cm     INTEGER;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS weight_kg     INTEGER;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS birth_date    TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS age           INTEGER;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS nationality_en TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS nationality_ar TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS country_of_birth_en TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS country_of_birth_ar TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS place_of_birth_en  TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS place_of_birth_ar  TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS current_club_id      TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS current_club_name_en TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS current_club_name_ar TEXT;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS profile_fetched_at   TEXT;
+
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS team_id            TEXT;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS team_name_en       TEXT;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS team_name_ar       TEXT;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS season_name        TEXT;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS competition_id     TEXT;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS competition_name_en TEXT;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS competition_name_ar TEXT;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS appearances        INTEGER;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS goals              INTEGER;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS assists            INTEGER;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS yellow_cards       INTEGER;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS red_cards          INTEGER;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS minutes_played     INTEGER;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS is_loan            INTEGER DEFAULT 0;
+ALTER TABLE player_career_entries ADD COLUMN IF NOT EXISTS sort_order         INTEGER;
+
+ALTER TABLE venues ADD COLUMN IF NOT EXISTS name_ar   TEXT;
+ALTER TABLE venues ADD COLUMN IF NOT EXISTS latitude  DOUBLE PRECISION;
+ALTER TABLE venues ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS season_id          TEXT REFERENCES seasons(id);
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS listed_date        TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS period             TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS round_name         TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS gameset_name       TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS gameset_name_ar    TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS gameset_id         TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS gameset_is_knockout INTEGER DEFAULT 0;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS venue_id           BIGINT REFERENCES venues(id);
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS referee            TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS lineups_confirmed  INTEGER DEFAULT 0;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS home_formation     TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS away_formation     TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS home_score       INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS away_score       INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS home_score_ht    INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS away_score_ht    INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS home_score_ft    INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS away_score_ft    INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS home_score_et    INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS away_score_et    INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS home_agg_score   INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS away_agg_score   INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS home_pen_score   INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS away_pen_score   INTEGER;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS home_red_cards   INTEGER DEFAULT 0;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS away_red_cards   INTEGER DEFAULT 0;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS slug_en            TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS slug_ar            TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS detail_fetched_at  TEXT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS last_updated_at    TEXT;
+
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS team_side             TEXT;
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS minute                INTEGER;
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS extra_minute          INTEGER;
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS player_id             TEXT REFERENCES players(id);
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS player_name_en        TEXT;
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS player_name_ar        TEXT;
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS related_player_id     TEXT REFERENCES players(id);
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS related_player_name_en TEXT;
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS related_player_name_ar TEXT;
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS home_score_after      INTEGER;
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS away_score_after      INTEGER;
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS outcome               TEXT;
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS decision              TEXT;
+ALTER TABLE match_events ADD COLUMN IF NOT EXISTS sort_order            INTEGER;
+
+ALTER TABLE lineups ADD COLUMN IF NOT EXISTS is_starter   INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE lineups ADD COLUMN IF NOT EXISTS shirt_number INTEGER;
+ALTER TABLE lineups ADD COLUMN IF NOT EXISTS position_x   DOUBLE PRECISION;
+ALTER TABLE lineups ADD COLUMN IF NOT EXISTS position_y   DOUBLE PRECISION;
+ALTER TABLE lineups ADD COLUMN IF NOT EXISTS is_captain   INTEGER DEFAULT 0;
+ALTER TABLE lineups ADD COLUMN IF NOT EXISTS rating       DOUBLE PRECISION;
+
+ALTER TABLE match_managers ADD COLUMN IF NOT EXISTS manager_id      TEXT;
+ALTER TABLE match_managers ADD COLUMN IF NOT EXISTS manager_name_en TEXT;
+ALTER TABLE match_managers ADD COLUMN IF NOT EXISTS manager_name_ar TEXT;
+
+ALTER TABLE team_match_stats ADD COLUMN IF NOT EXISTS value DOUBLE PRECISION;
+
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS season_id     TEXT REFERENCES seasons(id);
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS stage         TEXT DEFAULT 'total';
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS table_name    TEXT;
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS played        INTEGER;
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS win           INTEGER;
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS draw          INTEGER;
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS lose          INTEGER;
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS goals_for     INTEGER;
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS goals_against INTEGER;
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS goal_diff     INTEGER;
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS points        INTEGER;
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS form_json     TEXT;
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS markers_json  TEXT;
+ALTER TABLE standings ADD COLUMN IF NOT EXISTS updated_at    TEXT;
+
+ALTER TABLE gamesets ADD COLUMN IF NOT EXISTS season_id       TEXT REFERENCES seasons(id);
+ALTER TABLE gamesets ADD COLUMN IF NOT EXISTS name_en         TEXT;
+ALTER TABLE gamesets ADD COLUMN IF NOT EXISTS name_ar         TEXT;
+ALTER TABLE gamesets ADD COLUMN IF NOT EXISTS is_active       INTEGER DEFAULT 0;
+ALTER TABLE gamesets ADD COLUMN IF NOT EXISTS sort_order      INTEGER;
+
+ALTER TABLE standings_markers ADD COLUMN IF NOT EXISTS season_id TEXT;
+ALTER TABLE standings_markers ADD COLUMN IF NOT EXISTS name      TEXT;
+ALTER TABLE standings_markers ADD COLUMN IF NOT EXISTS type      TEXT;
+
+ALTER TABLE competition_scrapes ADD COLUMN IF NOT EXISTS season_id     TEXT;
+ALTER TABLE competition_scrapes ADD COLUMN IF NOT EXISTS has_standings INTEGER DEFAULT 1;
+ALTER TABLE competition_scrapes ADD COLUMN IF NOT EXISTS standings_at  TEXT;
+ALTER TABLE competition_scrapes ADD COLUMN IF NOT EXISTS matches_at    TEXT;
+
+ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS run_mode           TEXT;
+ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS target             TEXT;
+ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS source             TEXT;
+ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS competitions_found INTEGER DEFAULT 0;
+ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS matches_found      INTEGER DEFAULT 0;
+ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS matches_stored     INTEGER DEFAULT 0;
+ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS details_fetched    INTEGER DEFAULT 0;
+ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS error              TEXT;
+ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS started_at         TEXT;
+ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS finished_at        TEXT;
+
+-- ===========================================================================
+-- PASS 3 - INDEXES
+-- Must run AFTER pass 2: indexes referencing columns that only exist in the
+-- new schema (e.g. idx_players_current_club on players.current_club_id)
+-- would fail on an old database otherwise.
+-- ===========================================================================
+CREATE INDEX IF NOT EXISTS idx_seasons_competition    ON seasons(competition_id);
+CREATE INDEX IF NOT EXISTS idx_teams_name_en          ON teams(name_en);
+CREATE INDEX IF NOT EXISTS idx_teams_name_ar          ON teams(name_ar);
+CREATE INDEX IF NOT EXISTS idx_players_name_en        ON players(name_en);
+CREATE INDEX IF NOT EXISTS idx_players_name_ar        ON players(name_ar);
+CREATE INDEX IF NOT EXISTS idx_players_current_club   ON players(current_club_id);
+CREATE INDEX IF NOT EXISTS idx_player_career_player   ON player_career_entries(player_id);
+CREATE INDEX IF NOT EXISTS idx_player_career_team     ON player_career_entries(team_id);
+CREATE INDEX IF NOT EXISTS idx_matches_date           ON matches(match_date);
+CREATE INDEX IF NOT EXISTS idx_matches_listed_date    ON matches(listed_date);
+CREATE INDEX IF NOT EXISTS idx_matches_kickoff        ON matches(kickoff_utc);
+CREATE INDEX IF NOT EXISTS idx_matches_competition    ON matches(competition_id);
+CREATE INDEX IF NOT EXISTS idx_matches_gameset        ON matches(competition_id, gameset_id);
+CREATE INDEX IF NOT EXISTS idx_matches_status         ON matches(status);
+CREATE INDEX IF NOT EXISTS idx_matches_home_team      ON matches(home_team_id);
+CREATE INDEX IF NOT EXISTS idx_matches_away_team      ON matches(away_team_id);
+CREATE INDEX IF NOT EXISTS idx_events_match           ON match_events(match_id);
+CREATE INDEX IF NOT EXISTS idx_events_player          ON match_events(player_id);
+CREATE INDEX IF NOT EXISTS idx_events_type            ON match_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_lineups_player         ON lineups(player_id);
+CREATE INDEX IF NOT EXISTS idx_lineups_team           ON lineups(team_id);
+CREATE INDEX IF NOT EXISTS idx_standings_comp         ON standings(competition_id, season_id, stage);
