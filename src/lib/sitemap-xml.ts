@@ -1,14 +1,16 @@
 /**
  * Sitemap XML generation for the split sitemap setup:
  *
- *   /sitemap.xml            -> sitemap INDEX (a list of child sitemaps)
- *   /sitemaps/main.xml      -> the home page (/, /?lang=en)
- *   /sitemaps/days-YYYY-MM  -> one sitemap PER MONTH of day-listing pages
- *                              (/?date=... rolling window: past 7 + next 3
- *                              days, so a month file never exceeds ~62 URLs)
- *   /sitemaps/matches-N.xml -> per-match pages in chunks of 500 URLs, so the
- *                              setup scales as the backend accumulates
- *                              matches without any single file growing huge
+ *   /sitemap.xml                    -> sitemap INDEX (a list of child sitemaps)
+ *   /sitemaps/main.xml              -> the home page (/, /?lang=en)
+ *   /sitemaps/days-YYYY-MM          -> one sitemap PER MONTH of day-listing pages
+ *                                      (/?date=... rolling window: past 7 + next 3
+ *                                      days, so a month file never exceeds ~62 URLs)
+ *   /sitemaps/matches-N.xml         -> match pages in chunks of 500 URLs. Every
+ *                                      match contributes TWO URLs - its Arabic
+ *                                      slug URL and its English slug URL
+ *   /sitemaps/competitions-N.xml    -> competition pages (standings/results) in
+ *                                      500-URL chunks, also two URLs per entity
  *
  * Everything is computed at REQUEST time (force-dynamic route handlers): the
  * rolling window moves, new matches appear and SITE_URL changes take effect
@@ -16,8 +18,9 @@
  * ("&" in "?date=...&lang=en" MUST be &amp; - a raw "&" makes the whole file
  * unparsable: "EntityRef: expecting ';'").
  */
+import type { ListingResponse } from "@/lib/goal/types";
 import { getDayListing } from "@/lib/goal/service";
-import { matchSlug, matchUrlPath, utcToday } from "@/lib/seo";
+import { compUrlPair, matchUrlPair, utcToday } from "@/lib/seo";
 
 /** how many PAST days get a day-listing URL in the sitemap (results pages) */
 export const SITEMAP_DAYS_PAST = 7;
@@ -25,8 +28,12 @@ export const SITEMAP_DAYS_PAST = 7;
 export const SITEMAP_DAYS_FUTURE = 3;
 /** max match URLs per /sitemaps/matches-N.xml file */
 export const MATCHES_PER_SITEMAP = 500;
-/** total cap on discovered match URLs (today + yesterday listings) */
+/** total cap on discovered match URLs (AR + EN per match) */
 export const MAX_MATCH_URLS = 2_000;
+/** max competition URLs per /sitemaps/competitions-N.xml file */
+export const COMPETITIONS_PER_SITEMAP = 500;
+/** total cap on discovered competition URLs (AR + EN per competition) */
+export const MAX_COMPETITION_URLS = 1_000;
 /** true -> only major-competition matches in the sitemap (quality over
  *  quantity: obscure matches would send crawlers hammering /api/match/:id) */
 export const SITEMAP_MAJOR_ONLY = true;
@@ -174,12 +181,10 @@ export function dayEntriesForMonth(
 }
 
 /**
- * Absolute match-page URLs (with the /match/<id>/<slug> canonical form),
- * discovered from today's + yesterday's listings. Fail-safe: a slow or down
- * backend yields an empty list (the sitemap then simply has no match URLs
- * until the next crawl) instead of timing the response out.
+ * Budgeted fetch of today's + yesterday's listings (fail-safe: a slow or
+ * down backend yields an empty list instead of timing the response out).
  */
-export async function collectMatchUrls(base: string): Promise<string[]> {
+async function windowListings(): Promise<ListingResponse[]> {
   const today = utcToday();
   const days = [today, addDays(today, -1)];
   try {
@@ -190,26 +195,65 @@ export async function collectMatchUrls(base: string): Promise<string[]> {
       ),
     ]);
     if (!listings) return [];
-    const urls: string[] = [];
-    const seen = new Set<string>();
-    for (const listing of listings) {
-      if (listing.status !== 200 || !listing.data) continue;
-      for (const g of listing.data.groups) {
-        for (const m of g.matches) {
-          if (seen.has(m.matchId)) continue;
-          seen.add(m.matchId);
-          urls.push(`${base}${matchUrlPath(m.matchId, matchSlug(m))}`);
-          if (urls.length >= MAX_MATCH_URLS) return urls;
-        }
-      }
-    }
-    return urls;
+    return listings
+      .filter((l) => l.status === 200 && l.data)
+      .map((l) => l.data as ListingResponse);
   } catch {
     return [];
   }
 }
 
+/**
+ * Absolute match-page URLs - BOTH languages per match (Arabic slug URL +
+ * English slug URL), discovered from today's + yesterday's listings. Every
+ * URL is exactly the canonical URL of that language's page.
+ */
+export async function collectMatchUrls(base: string): Promise<string[]> {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const listing of await windowListings()) {
+    for (const g of listing.groups) {
+      for (const m of g.matches) {
+        if (seen.has(m.matchId)) continue;
+        seen.add(m.matchId);
+        const pair = matchUrlPair(m.matchId, m);
+        urls.push(`${base}${pair.ar}`);
+        urls.push(`${base}${pair.en}`);
+        if (urls.length >= MAX_MATCH_URLS) return urls;
+      }
+    }
+  }
+  return urls;
+}
+
 /** Number of /sitemaps/matches-N.xml chunks for a discovered URL count. */
 export function matchChunkCount(urlCount: number): number {
   return Math.max(1, Math.ceil(urlCount / MATCHES_PER_SITEMAP));
+}
+
+/**
+ * Absolute competition-page URLs - BOTH languages per competition, from the
+ * unique competitions of today's + yesterday's listings. Each is the
+ * canonical URL of that language's standings page.
+ */
+export async function collectCompetitionUrls(base: string): Promise<string[]> {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const listing of await windowListings()) {
+    for (const g of listing.groups) {
+      const comp = g.competition;
+      if (!comp?.id || seen.has(comp.id)) continue;
+      seen.add(comp.id);
+      const pair = compUrlPair(comp.id, comp);
+      urls.push(`${base}${pair.ar}`);
+      urls.push(`${base}${pair.en}`);
+      if (urls.length >= MAX_COMPETITION_URLS) return urls;
+    }
+  }
+  return urls;
+}
+
+/** Number of /sitemaps/competitions-N.xml chunks for a URL count. */
+export function competitionChunkCount(urlCount: number): number {
+  return Math.max(1, Math.ceil(urlCount / COMPETITIONS_PER_SITEMAP));
 }

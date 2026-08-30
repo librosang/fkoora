@@ -129,30 +129,30 @@ export function pageDescription(
 const APP_NAME_AR = "فكوورة";
 const APP_NAME_EN = "Fkoora";
 
-function teamName(m: MatchRow, side: "home" | "away", lang: Lang): string {
-  const team = side === "home" ? m.homeTeam : m.awayTeam;
-  const name = lang === "ar" ? team.nameAr || team.nameEn : team.nameEn || team.nameAr;
-  return name || "";
-}
-
 // ---------------------------------------------------------------------------
-// match page (per-match URLs: /match/<id>/<home>-vs-<away>)
+// URL slugs (bilingual: every match/competition has an AR and an EN slug)
 // ---------------------------------------------------------------------------
 
 /** Characters kept in URL slugs: a-z, 0-9 and Arabic letters. */
 const SLUG_DISALLOWED = /[^a-z0-9\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]+/g;
 
 /**
- * URL-slugify a name: strip accents (é -> e), lowercase, keep Latin/digits/
- * Arabic letters, everything else becomes a hyphen. "Bayern München" ->
- * "bayern-munchen", "الهلال" stays Arabic (percent-encoded when placed in a
- * URL). Returns "" when nothing usable remains.
+ * URL-slugify a name: strip accents (é -> e) and Arabic diacritics, lowercase,
+ * keep Latin/digits/Arabic letters, everything else becomes a hyphen.
+ * "Bayern München" -> "bayern-munchen", "الهلال" stays Arabic
+ * (percent-encoded when placed in a URL). Returns "" when nothing remains.
+ *
+ * The Arabic strip runs AFTER NFKD because decomposition splits hamza-alef
+ * letters (أ/إ/آ) into a bare alef + a combining hamza mark (U+0653..U+065F) -
+ * dropping that mark normalizes them to plain ا, keeping slugs clean and
+ * stable ("أبطال" -> "ابطال").
  */
 export function slugifyText(input: string | null | undefined): string {
   if (!input) return "";
   const slug = input
     .normalize("NFKD")
-    .replace(/[\u0300-\u036F]/g, "")
+    // Latin combining marks + Arabic tashkeel/hamza marks + tatweel
+    .replace(/[\u0300-\u036F\u064B-\u065F\u0670\u0640]/g, "")
     .toLowerCase()
     .replace(SLUG_DISALLOWED, "-")
     .replace(/-{2,}/g, "-")
@@ -160,22 +160,61 @@ export function slugifyText(input: string | null | undefined): string {
   return slug;
 }
 
+/** Decode a URL path segment defensively (invalid escapes pass through). */
+export function safeDecodeSegment(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/** The two canonical URLs of an entity - one per language. */
+export interface LangUrlPair {
+  ar: string;
+  en: string;
+}
+
 /** Max combined slug length - long club names must not bloat the URL. */
 const MATCH_SLUG_MAX = 80;
 
+/** Any Arabic letter? (decides the Arabic-vs-Latin slug joiner). */
+const HAS_ARABIC = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+
 /**
- * Canonical slug of a match: "<home>-vs-<away>" from the English team names
- * (Arabic fallback), e.g. "real-madrid-vs-bayern-munich". The slug is
- * language-neutral (always English when available) so the ar/en hreflang
- * pair shares ONE url. Returns "" when neither team has a usable name.
+ * Canonical slug of a match in ONE language:
+ *   en -> "real-madrid-vs-bayern-munchen"  (English names, Arabic fallback)
+ *   ar -> "ريال-مدريد-ضد-بايرن-ميونخ"        (Arabic names, English fallback)
+ *
+ * Each language gets its own URL (its own slug), so Arabic users see/search
+ * Arabic URLs and English users English ones - both are indexed, each is
+ * self-canonical and they reference each other through hreflang. When NEITHER
+ * team has an Arabic name the Arabic slug is built from the Latin names with
+ * the Latin joiner ("botafogo-vs-palmeiras"), so the two language slugs
+ * COLLIDE and matchUrlPair() switches the English variant to "?lang=en" on the
+ * shared URL - instead of a bizarre mixed-script "botafogo-ضد-palmeiras".
+ * Returns "" when neither team has a usable name.
  */
-export function matchSlug(m: {
-  homeTeam: TeamRef;
-  awayTeam: TeamRef;
-}): string {
-  const home = slugifyText(m.homeTeam?.nameEn || m.homeTeam?.nameAr);
-  const away = slugifyText(m.awayTeam?.nameEn || m.awayTeam?.nameAr);
-  let slug = home && away ? `${home}-vs-${away}` : home || away;
+export function matchSlug(
+  m: { homeTeam: TeamRef; awayTeam: TeamRef },
+  lang: Lang,
+): string {
+  const home = slugifyText(
+    lang === "ar"
+      ? m.homeTeam?.nameAr || m.homeTeam?.nameEn
+      : m.homeTeam?.nameEn || m.homeTeam?.nameAr,
+  );
+  const away = slugifyText(
+    lang === "ar"
+      ? m.awayTeam?.nameAr || m.awayTeam?.nameEn
+      : m.awayTeam?.nameEn || m.awayTeam?.nameAr,
+  );
+  // Arabic joiner only when at least one side actually rendered in Arabic
+  const joiner =
+    lang === "ar" && (HAS_ARABIC.test(home) || HAS_ARABIC.test(away))
+      ? "ضد"
+      : "vs";
+  let slug = home && away ? `${home}-${joiner}-${away}` : home || away;
   if (slug.length > MATCH_SLUG_MAX) {
     slug = slug.slice(0, MATCH_SLUG_MAX).replace(/-+$/g, "");
   }
@@ -184,13 +223,102 @@ export function matchSlug(m: {
 
 /**
  * Path of a match page: "/match/<id>/<slug>" ("/match/<id>" when no slug is
- * derivable). The slug is percent-encoded, so Arabic fallback slugs produce
- * valid URLs. Used EVERYWHERE (page metadata, JSON-LD, sitemap, client
- * pushState) so every generated match URL is identical.
+ * derivable). The slug is percent-encoded, so Arabic slugs produce valid
+ * URLs. Used EVERYWHERE (page metadata, JSON-LD, sitemap, client pushState)
+ * so every generated match URL is identical.
  */
 export function matchUrlPath(matchId: string, slug: string): string {
   const id = encodeURIComponent(matchId);
   return slug ? `/match/${id}/${encodeURIComponent(slug)}` : `/match/${id}`;
+}
+
+/**
+ * The two canonical URLs of a match (path + query, no origin):
+ *   ar -> "/match/<id>/<arabic-slug>"        (site default, no param)
+ *   en -> "/match/<id>/<english-slug>"        (no param - the slug implies
+ *        the language). When both slugs collide (e.g. no Arabic names), the
+ *        English variant needs the explicit "?lang=en" switch on the shared
+ *        URL - the caller does not have to think about that edge case.
+ */
+export function matchUrlPair(
+  matchId: string,
+  m: { homeTeam: TeamRef; awayTeam: TeamRef },
+): LangUrlPair {
+  const slugAr = matchSlug(m, "ar");
+  const slugEn = matchSlug(m, "en");
+  const ar = matchUrlPath(matchId, slugAr);
+  const en =
+    slugAr === slugEn
+      ? `${matchUrlPath(matchId, slugEn)}?lang=en`
+      : matchUrlPath(matchId, slugEn);
+  return { ar, en };
+}
+
+/** The canonical URL of a match in ONE language (see matchUrlPair). */
+export function matchUrlFor(
+  matchId: string,
+  m: { homeTeam: TeamRef; awayTeam: TeamRef },
+  lang: Lang,
+): string {
+  return lang === "en"
+    ? matchUrlPair(matchId, m).en
+    : matchUrlPair(matchId, m).ar;
+}
+
+// ---------------------------------------------------------------------------
+// competition page (per-competition URLs: /competition/<id>/<name>)
+// ---------------------------------------------------------------------------
+
+const COMP_SLUG_MAX = 60;
+
+/** Slug of a competition name in one language ("premier-league" /
+ *  "الدوري-الإنجليزي-الممتاز"). English fallback when the Arabic name is
+ *  missing and vice versa. */
+export function compSlug(
+  c: { nameEn?: string | null; nameAr?: string | null } | null | undefined,
+  lang: Lang,
+): string {
+  const name =
+    lang === "ar" ? c?.nameAr || c?.nameEn : c?.nameEn || c?.nameAr;
+  let slug = slugifyText(name);
+  if (slug.length > COMP_SLUG_MAX) {
+    slug = slug.slice(0, COMP_SLUG_MAX).replace(/-+$/g, "");
+  }
+  return slug;
+}
+
+/** Path of a competition page: "/competition/<id>/<slug>". */
+export function compUrlPath(competitionId: string, slug: string): string {
+  const id = encodeURIComponent(competitionId);
+  return slug
+    ? `/competition/${id}/${encodeURIComponent(slug)}`
+    : `/competition/${id}`;
+}
+
+/** The two canonical URLs of a competition (same rules as matchUrlPair). */
+export function compUrlPair(
+  competitionId: string,
+  c: { nameEn?: string | null; nameAr?: string | null } | null | undefined,
+): LangUrlPair {
+  const slugAr = compSlug(c, "ar");
+  const slugEn = compSlug(c, "en");
+  const ar = compUrlPath(competitionId, slugAr);
+  const en =
+    slugAr === slugEn
+      ? `${compUrlPath(competitionId, slugEn)}?lang=en`
+      : compUrlPath(competitionId, slugEn);
+  return { ar, en };
+}
+
+/** The canonical URL of a competition in ONE language. */
+export function compUrlFor(
+  competitionId: string,
+  c: { nameEn?: string | null; nameAr?: string | null } | null | undefined,
+  lang: Lang,
+): string {
+  return lang === "en"
+    ? compUrlPair(competitionId, c).en
+    : compUrlPair(competitionId, c).ar;
 }
 /** Structural subset shared by MatchRow and MatchDetail. */
 export interface MatchMetaInput {
@@ -255,13 +383,26 @@ export function matchDescription(m: MatchMetaInput, lang: Lang): string {
     : `${home} vs ${away}${context ? ` — ${context}` : ""}. Kick-off time, lineups and live coverage on ${APP_NAME_EN}.`;
 }
 
-/** JSON-LD for a match page: SportsEvent + breadcrumb. */
-export function matchJsonLd(m: MatchMetaInput & { matchId: string }, lang: Lang): string {
+/**
+ * One SportsEvent JSON-LD node shared by the match page, the day listing and
+ * the competition page. Google's Event rich result REQUIRES name, startDate,
+ * location and eventStatus - so when the venue is unknown the node gets a
+ * VirtualLocation pointing at the coverage page (this is an online event:
+ * our coverage), keeping every node rich-result-complete in both languages.
+ */
+function buildSportsEvent(
+  m: MatchMetaInput & { matchId: string },
+  lang: Lang,
+): Record<string, unknown> {
   const base = siteUrl();
   const home = displayName(m.homeTeam, lang);
   const away = displayName(m.awayTeam, lang);
-  const hasScore = m.homeScore !== null && m.awayScore !== null && m.status !== "FIXTURE";
-  const url = `${base}${matchUrlPath(m.matchId, matchSlug(m))}`;
+  const hasScore =
+    m.homeScore !== null && m.awayScore !== null && m.status !== "FIXTURE";
+  const url = `${base}${matchUrlFor(m.matchId, m, lang)}`;
+  // the OTHER language's team name: alternateName serves both audiences
+  const altName = (team: TeamRef) =>
+    lang === "ar" ? team.nameEn || team.nameAr : team.nameAr || team.nameEn;
 
   const event: Record<string, unknown> = {
     "@type": "SportsEvent",
@@ -272,6 +413,9 @@ export function matchJsonLd(m: MatchMetaInput & { matchId: string }, lang: Lang)
         : `${home} vs ${away}`,
     sport: lang === "ar" ? "كرة القدم" : "Football",
     url,
+    inLanguage: lang,
+    description: matchDescription(m, lang),
+    image: [`${siteUrl()}/og-image.png`],
     eventAttendanceMode: "https://schema.org/OnlineEventAttendanceMode",
     isAccessibleForFree: true,
     eventStatus:
@@ -284,13 +428,13 @@ export function matchJsonLd(m: MatchMetaInput & { matchId: string }, lang: Lang)
       {
         "@type": "SportsTeam",
         name: home,
-        alternateName: m.homeTeam.nameEn || m.homeTeam.nameAr || undefined,
+        alternateName: altName(m.homeTeam) || undefined,
         sport: lang === "ar" ? "كرة القدم" : "Football",
       },
       {
         "@type": "SportsTeam",
         name: away,
-        alternateName: m.awayTeam.nameEn || m.awayTeam.nameAr || undefined,
+        alternateName: altName(m.awayTeam) || undefined,
         sport: lang === "ar" ? "كرة القدم" : "Football",
       },
     ],
@@ -300,7 +444,20 @@ export function matchJsonLd(m: MatchMetaInput & { matchId: string }, lang: Lang)
     lang === "ar"
       ? m.venueNameAr || m.venueNameEn
       : m.venueNameEn || m.venueNameAr;
-  if (venue) event.location = { "@type": "Place", name: venue };
+  event.location = venue
+    ? { "@type": "Place", name: venue }
+    : { "@type": "VirtualLocation", url };
+  return event;
+}
+
+/** JSON-LD for a match page: SportsEvent + breadcrumb. */
+export function matchJsonLd(
+  m: MatchMetaInput & { matchId: string },
+  lang: Lang,
+): string {
+  const base = siteUrl();
+  const event = buildSportsEvent(m, lang);
+  const url = event.url as string;
 
   return JSON.stringify({
     "@context": "https://schema.org",
@@ -328,9 +485,10 @@ export function matchJsonLd(m: MatchMetaInput & { matchId: string }, lang: Lang)
 }
 
 /**
- * JSON-LD for the day listing: an ItemList of SportsEvent entries (up to 30).
- * Bilingual team names go into the SportsTeam alternateName so the graph
- * serves both audiences regardless of the rendering language.
+ * JSON-LD for the day listing: an ItemList of SportsEvent entries (up to 30)
+ * pointing at the per-language match pages. Bilingual team names go into the
+ * SportsTeam alternateName so the graph serves both audiences regardless of
+ * the rendering language.
  */
 export function buildListingJsonLd(
   listing: ListingResponse | null,
@@ -338,7 +496,6 @@ export function buildListingJsonLd(
 ): string | null {
   if (!listing || listing.totalMatches === 0) return null;
 
-  const base = siteUrl();
   const matches: MatchRow[] = [];
   for (const g of listing.groups) {
     for (const m of g.matches) {
@@ -348,52 +505,6 @@ export function buildListingJsonLd(
     if (matches.length >= 30) break;
   }
 
-  const events = matches.map((m) => {
-    const home = teamName(m, "home", lang);
-    const away = teamName(m, "away", lang);
-    const homeAlt = m.homeTeam.nameEn || m.homeTeam.nameAr || "";
-    const awayAlt = m.awayTeam.nameEn || m.awayTeam.nameAr || "";
-    const event: Record<string, unknown> = {
-      "@type": "SportsEvent",
-      name: lang === "ar" ? `${home} ضد ${away}` : `${home} vs ${away}`,
-      sport: lang === "ar" ? "كرة القدم" : "Football",
-      url: `${base}${matchUrlPath(m.matchId, matchSlug(m))}`,
-      isAccessibleForFree: true,
-      eventAttendanceMode: "https://schema.org/OnlineEventAttendanceMode",
-      eventStatus: "https://schema.org/EventScheduled",
-      competitor: [
-        {
-          "@type": "SportsTeam",
-          name: home,
-          alternateName: homeAlt || undefined,
-          sport: lang === "ar" ? "كرة القدم" : "Football",
-        },
-        {
-          "@type": "SportsTeam",
-          name: away,
-          alternateName: awayAlt || undefined,
-          sport: lang === "ar" ? "كرة القدم" : "Football",
-        },
-      ],
-    };
-    if (m.kickoffUtc) event.startDate = m.kickoffUtc;
-    if (m.venueNameEn || m.venueNameAr) {
-      event.location = {
-        "@type": "Place",
-        name: lang === "ar" ? m.venueNameAr || m.venueNameEn : m.venueNameEn || m.venueNameAr,
-      };
-    }
-    // finished matches carry a result in the name (richer snippet wording)
-    if (
-      m.status !== "FIXTURE" &&
-      m.homeScore !== null &&
-      m.awayScore !== null
-    ) {
-      event.name = `${event.name} ${m.homeScore}-${m.awayScore}`;
-    }
-    return event;
-  });
-
   const graph = {
     "@context": "https://schema.org",
     "@type": "ItemList",
@@ -401,14 +512,134 @@ export function buildListingJsonLd(
       lang === "ar"
         ? `مباريات يوم ${formatDateTitle(listing.date, lang)}`
         : `Football matches on ${formatDateTitle(listing.date, lang)}`,
+    inLanguage: lang,
     numberOfItems: listing.totalMatches,
-    itemListElement: events.map((e, i) => ({
+    itemListElement: matches.map((m, i) => ({
       "@type": "ListItem",
       position: i + 1,
-      item: e,
+      item: buildSportsEvent(m, lang),
     })),
   };
   return JSON.stringify(graph);
+}
+
+// ---------------------------------------------------------------------------
+// competition page SEO (titles, description, JSON-LD)
+// ---------------------------------------------------------------------------
+
+/** What the competition title/description/JSON-LD builders need. */
+export interface CompetitionMetaInput {
+  competition: {
+    nameEn?: string | null;
+    nameAr?: string | null;
+    areaNameEn?: string | null;
+    areaNameAr?: string | null;
+  } | null | undefined;
+  seasonName?: string | null;
+}
+
+function compDisplayName(c: CompetitionMetaInput["competition"], lang: Lang): string {
+  if (!c) return "";
+  return (
+    (lang === "ar" ? c.nameAr || c.nameEn : c.nameEn || c.nameAr) || ""
+  );
+}
+
+/** <title> for a competition page (same string on server and client). */
+export function competitionTitle(c: CompetitionMetaInput, lang: Lang): string {
+  const name = compDisplayName(c.competition, lang);
+  const season = c.seasonName ? ` ${c.seasonName}` : "";
+  if (lang === "ar") {
+    return name
+      ? `ترتيب ${name}${season} — نتائج المباريات والجولات | ${APP_NAME_AR}`
+      : `ترتيب البطولة — النتائج والجولات | ${APP_NAME_AR}`;
+  }
+  return name
+    ? `${name}${season} Standings, Results & Fixtures | ${APP_NAME_EN}`
+    : `Competition Standings, Results & Fixtures | ${APP_NAME_EN}`;
+}
+
+/** Meta description for a competition page. */
+export function competitionDescription(
+  c: CompetitionMetaInput,
+  lang: Lang,
+): string {
+  const name = compDisplayName(c.competition, lang);
+  const season = c.seasonName ? ` ${c.seasonName}` : "";
+  if (lang === "ar") {
+    return name
+      ? `ترتيب فرق ${name}${season} محدّث لحظة بلحظة: نتائج جميع الجولات ومواعيد المباريات بتوقيتك المحلي وسجل مباريات الفرق — على ${APP_NAME_AR}.`
+      : `ترتيب البطولة محدّث لحظة بلحظة مع نتائج جميع الجولات ومواعيد المباريات — على ${APP_NAME_AR}.`;
+  }
+  return name
+    ? `${name}${season} live standings: results and fixtures for every round, kick-off times in your timezone and full match scores — bilingual on ${APP_NAME_EN}.`
+    : `Live competition standings with results and fixtures for every round — on ${APP_NAME_EN}.`;
+}
+
+/**
+ * JSON-LD for a competition page: an ItemList of the round's SportsEvent
+ * entries (every match links to its own match page in the SAME language) plus
+ * a BreadcrumbList. Both nodes carry inLanguage so each language variant is
+ * independently rich-result-eligible.
+ */
+export function competitionJsonLd(
+  input: {
+    competitionId: string;
+    competition: CompetitionMetaInput["competition"];
+    seasonName?: string | null;
+    /** localized name of the shown round (e.g. "Quarter-finals") */
+    gamesetName?: string | null;
+    matches: MatchRow[];
+  },
+  lang: Lang,
+): string {
+  const base = siteUrl();
+  const name = compDisplayName(input.competition, lang) ||
+    (lang === "ar" ? APP_NAME_AR : APP_NAME_EN);
+  const url = `${base}${compUrlFor(input.competitionId, input.competition, lang)}`;
+
+  const listName = input.gamesetName
+    ? lang === "ar"
+      ? `مباريات ${name} — ${input.gamesetName}`
+      : `${name} matches — ${input.gamesetName}`
+    : lang === "ar"
+      ? `مباريات ${name}`
+      : `${name} matches`;
+
+  return JSON.stringify({
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "ItemList",
+        name: listName,
+        url,
+        inLanguage: lang,
+        numberOfItems: input.matches.length,
+        itemListElement: input.matches.map((m, i) => ({
+          "@type": "ListItem",
+          position: i + 1,
+          item: buildSportsEvent(m, lang),
+        })),
+      },
+      {
+        "@type": "BreadcrumbList",
+        itemListElement: [
+          {
+            "@type": "ListItem",
+            position: 1,
+            name: lang === "ar" ? APP_NAME_AR : APP_NAME_EN,
+            item: base,
+          },
+          {
+            "@type": "ListItem",
+            position: 2,
+            name,
+            item: url,
+          },
+        ],
+      },
+    ],
+  });
 }
 
 /** Site-wide JSON-LD (WebSite + Organization) - rendered in the root layout. */

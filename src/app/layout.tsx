@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { headers } from "next/headers";
 import { buildSiteJsonLd, safeMetaBase } from "@/lib/seo";
 import "./globals.css";
 
@@ -105,13 +106,50 @@ export const viewport: Viewport = {
   themeColor: "#123a70",
 };
 
-export default function RootLayout({
+/**
+ * Language of the FIRST paint, derived from the request path (set by
+ * middleware - layouts cannot read nested page params):
+ *   1. explicit ?lang=en / ?lang=ar wins
+ *   2. Arabic percent-encoded bytes in the path -> an Arabic slug page
+ *   3. an ASCII-only slug on /match|/competition pages -> the English variant
+ *   4. default: Arabic (the site's primary language)
+ *
+ * Client components refine lang/dir reactively afterwards; this only has to
+ * be right for crawlers reading the server-rendered HTML.
+ */
+function pageLang(pathWithSearch: string): "ar" | "en" {
+  const qIndex = pathWithSearch.indexOf("?");
+  const path = qIndex >= 0 ? pathWithSearch.slice(0, qIndex) : pathWithSearch;
+  const search = qIndex >= 0 ? pathWithSearch.slice(qIndex + 1) : "";
+  const langParam = new URLSearchParams(search).get("lang");
+  if (langParam === "en") return "en";
+  if (langParam === "ar") return "ar";
+  // Arabic letters percent-encode into UTF-8 bytes D8../D9.. -> Arabic slug
+  if (/%D[89]%[0-9A-Fa-f]{2}/i.test(path)) return "ar";
+  // ASCII-only slug on entity pages -> the English slug variant
+  if (/^\/(match|competition)\/[^/]+\/[a-z0-9-]+$/i.test(path)) return "en";
+  return "ar";
+}
+
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  let pathWithSearch = "";
+  try {
+    pathWithSearch = (await headers()).get("x-pathname") || "";
+  } catch {
+    /* headers unavailable (static contexts) - Arabic default */
+  }
+  const lang = pageLang(pathWithSearch);
+
   return (
-    <html lang="ar" dir="rtl" suppressHydrationWarning>
+    <html
+      lang={lang}
+      dir={lang === "ar" ? "rtl" : "ltr"}
+      suppressHydrationWarning
+    >
       <body className="font-app antialiased">
         {/* site-wide structured data (WebSite + Organization) */}
         <script

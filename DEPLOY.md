@@ -268,6 +268,56 @@ docker compose up -d fkoora-api fkoora-frontend
 > `sh scripts/remove-legacy-seo-files.sh` deletes them if present (safe to
 > run anytime); a plain `git pull` handles removals automatically.
 
+### 7.1 Bilingual SEO URLs (v6) — how the language routing works
+
+Every match AND competition now has TWO canonical URLs — one per language —
+and the slug itself carries the language:
+
+```
+/match/<id>/chelsea-vs-brighton-hove-albion        English page
+/match/<id>/تشيلسي-ضد-برايتون-اند-هوف-البيون        Arabic page (site default)
+
+/competition/<id>/premier-league                   English standings page
+/competition/<id>/الدوري-الانجليزي-الممتاز          Arabic standings page
+```
+
+Rules worth knowing when operating the site:
+
+- **Legacy no-slug URLs still work**: `/match/<id>` and `/competition/<id>`
+  answer with a real HTTP **308** to the slug URL of the requested language
+  (`?lang=en` → the English slug, default → the Arabic slug). The `Location`
+  header is relative, so it never leaks an internal hostname.
+- **Both languages are indexed**: each variant is self-canonical, the two
+  reference each other via `hreflang` (`ar`, `en`, `x-default`), and BOTH are
+  listed in the sitemaps (`/sitemaps/matches-N.xml` two URLs per match,
+  `/sitemaps/competitions-N.xml` two per competition).
+- **When a team/competition has no Arabic name** the Arabic slug is built from
+  the Latin name, both language slugs collide, and the English variant moves
+  to the shared URL with `?lang=en` (canonical consolidates them cleanly).
+- **Rich results work in both languages**: every page ships JSON-LD with
+  `inLanguage` set to its own language — `SportsEvent` (name, startDate,
+  location, eventStatus, image, url, description) on match pages and inside
+  `ItemList`s on the home/competition pages, plus `BreadcrumbList`. Validate
+  after deploy at <https://search.google.com/test/rich-results> with one URL
+  per language.
+- **`?lang=en` / `?lang=ar` still override** the content language on any URL
+  (backwards compatibility); the canonical tag then consolidates the variant
+  onto the right slug URL.
+- Arabic slugs are normalized (hamza-alef → plain alef, no tashkeel), so
+  `/تشيلسي-ضد-...` and a hand-typed `/تشیلی...` variant still land on the
+  canonical page via redirect.
+
+**Local SEO verification** (uses the mock backend, no Docker needed):
+
+```bash
+node scripts/mock_backend.js &                                     # :9000
+bun run build
+PORT=3100 FOOTBALL_API_BASE=http://127.0.0.1:9000 SITE_URL=https://fkoora.site \
+  node .next/standalone/server.js &                                # :3100
+bash scripts/smoke_test.sh     # 67 checks: bilingual slugs, 308s, sitemaps,
+                               # JSON-LD rich results in BOTH languages
+```
+
 **Logs:**
 
 ```bash

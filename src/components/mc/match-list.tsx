@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ChevronDown, Trophy } from "lucide-react";
 import type { CompetitionGroup, CompetitionRef, Lang, MatchRow, TeamRef } from "@/lib/goal/types";
 import { compLabel, nameOf, statusDisplay, t } from "@/lib/i18n";
+import { compUrlFor, matchUrlFor } from "@/lib/seo";
 import { RedCardChips } from "./icons";
 import { Crest } from "./crest";
 
@@ -60,15 +61,22 @@ export function MatchList({ groups, lang, onOpen, onOpenCompetition }: MatchList
                   />
                 </span>
               </button>
-              <button
-                type="button"
-                onClick={() => onOpenCompetition(g.competition)}
+              {/* competition page link: a real <a href> so crawlers can
+                  discover every /competition/<id>/<slug> page straight from
+                  the SSR'd listing; the click is intercepted for the dialog +
+                  URL push (same UX as before) */}
+              <a
+                href={compUrlFor(g.competition.id, g.competition, lang)}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onOpenCompetition(g.competition);
+                }}
                 title={s.compInfo}
                 aria-label={`${s.compInfo}: ${compLabel(g.competition, lang)}`}
                 className="flex w-10 shrink-0 items-center justify-center border-s border-[#c3cedd] text-[#4a5a70] transition-colors hover:bg-[#c8d9ee] hover:text-[#17457f]"
               >
                 <Trophy className="h-4 w-4" />
-              </button>
+              </a>
             </div>
 
             {!isCollapsed && (
@@ -114,10 +122,15 @@ function MatchRowView({
   const live = st.kind === "live";
 
   return (
-    <button
-      type="button"
+    <a
+      href={matchUrlFor(m.matchId, m, lang)}
       role="listitem"
-      onClick={() => onOpen(m)}
+      onClick={(e) => {
+        // intercept for the dialog + URL push; crawlers without JS follow
+        // the href to the server-rendered match page
+        e.preventDefault();
+        onOpen(m);
+      }}
       className={`block w-full border-b border-[#e2e9f2] px-2 py-2 text-start transition-colors last:border-b-0 hover:bg-[#e8f1fb] ${
         zebra ? "bg-[#f6f9fd]" : "bg-white"
       }`}
@@ -202,7 +215,7 @@ function MatchRowView({
           <RedCardChips n={m.awayRedCards} />
         </div>
       </div>
-    </button>
+    </a>
   );
 }
 

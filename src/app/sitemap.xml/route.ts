@@ -1,5 +1,7 @@
 import {
   collectMatchUrls,
+  collectCompetitionUrls,
+  competitionChunkCount,
   matchChunkCount,
   sitemapIndexXml,
   windowMonths,
@@ -12,9 +14,11 @@ import { siteUrl, utcToday } from "@/lib/seo";
  *
  * Points crawlers at the split child sitemaps instead of listing every URL
  * in one giant file:
- *   /sitemaps/main.xml          - home page (/, /?lang=en)
- *   /sitemaps/days-YYYY-MM.xml  - day-listing pages, one file per month
- *   /sitemaps/matches-N.xml     - match pages, 500 URLs per file
+ *   /sitemaps/main.xml              - home page (/, /?lang=en)
+ *   /sitemaps/days-YYYY-MM.xml      - day-listing pages, one file per month
+ *   /sitemaps/matches-N.xml         - match pages, 500 URLs per file (AR + EN
+ *                                     slug URLs per match)
+ *   /sitemaps/competitions-N.xml    - competition pages, 500 URLs per file
  *
  * Generated at REQUEST time (never frozen at build): the rolling day window
  * advances, freshly played matches appear and runtime SITE_URL changes are
@@ -40,6 +44,12 @@ export async function GET() {
   const matchUrls = await collectMatchUrls(base);
   for (let i = 1; i <= matchChunkCount(matchUrls.length); i++) {
     items.push({ loc: `${base}/sitemaps/matches-${i}.xml`, lastmod: now });
+  }
+
+  // competition sitemaps: same chunking (at least one entry)
+  const competitionUrls = await collectCompetitionUrls(base);
+  for (let i = 1; i <= competitionChunkCount(competitionUrls.length); i++) {
+    items.push({ loc: `${base}/sitemaps/competitions-${i}.xml`, lastmod: now });
   }
 
   return new Response(sitemapIndexXml(items), { headers: XML_HEADERS });

@@ -10,10 +10,12 @@ import type {
 } from "@/lib/goal/types";
 import { localToday, t } from "@/lib/i18n";
 import {
+  competitionDescription,
+  competitionTitle,
+  compUrlFor,
   matchDescription,
-  matchSlug,
   matchTitle,
-  matchUrlPath,
+  matchUrlFor,
   pageDescription,
   pageTitle,
 } from "@/lib/seo";
@@ -91,6 +93,8 @@ export function HomeClient({
   // true while the browser URL points at a /match/<id> page we pushed from
   // this listing (closing the dialog pops back with history.back())
   const pushedMatchUrl = useRef(false);
+  // same for /competition/<id> pages (the competition dialog pushes its URL)
+  const pushedCompUrl = useRef(false);
 
   // mount: read persisted prefs + local "today" (avoids SSR/CSR mismatch)
   useEffect(() => {
@@ -145,7 +149,7 @@ export function HomeClient({
     [],
   );
 
-  /** restore the day listing's SEO meta after leaving a match URL */
+  /** restore the day listing's SEO meta after leaving a match/competition URL */
   const restoreDayMeta = useCallback((d: string, lang: Lang) => {
     const t0 = localToday() || d;
     document.title = pageTitle(d, t0, lang);
@@ -154,7 +158,18 @@ export function HomeClient({
       ?.setAttribute("content", pageDescription(d, t0, lang));
   }, []);
 
-  /** open a match: dialog + shareable/crawlable slug URL + match SEO meta */
+  /** apply the competition page's SEO meta while its URL is showing (the SSR
+   *  version at /competition/<id>/<slug> serves the same strings to crawlers) */
+  const applyCompMeta = useCallback((c: CompetitionRef, lang: Lang) => {
+    document.title = competitionTitle({ competition: c }, lang);
+    document
+      .querySelector('meta[name="description"]')
+      ?.setAttribute("content", competitionDescription({ competition: c }, lang));
+  }, []);
+
+  /** open a match: dialog + shareable/crawlable slug URL + match SEO meta.
+   *  The URL uses the CURRENT language's slug (Arabic slug for ar, English
+   *  slug for en) - identical to the server canonical. */
   const openMatch = useCallback(
     (m: MatchRow) => {
       setSelected(m);
@@ -162,11 +177,10 @@ export function HomeClient({
         // soft navigation: the listing stays mounted and the dialog opens on
         // top, but the URL (and everything a crawler sees when it later fetches
         // this URL server-side) becomes the match's own slug page
-        // (/match/<id>/<home>-vs-<away> - identical to the server canonical)
         window.history.pushState(
           { mcMatch: m.matchId },
           "",
-          matchUrlPath(m.matchId, matchSlug(m)),
+          matchUrlFor(m.matchId, m, lang),
         );
         pushedMatchUrl.current = true;
       } catch {
@@ -177,11 +191,36 @@ export function HomeClient({
     [applyMatchMeta, lang],
   );
 
-  /** close the match dialog: pop back to the listing URL + restore its meta */
+  /** open a competition: dialog + shareable/crawlable slug URL + its meta
+   *  (exactly the same treatment matches get) */
+  const openCompetition = useCallback(
+    (c: CompetitionRef) => {
+      setCompSelected(c);
+      try {
+        window.history.pushState(
+          { mcCompetition: c.id },
+          "",
+          compUrlFor(c.id, c, lang),
+        );
+        pushedCompUrl.current = true;
+      } catch {
+        /* history unavailable - the dialog still opens, just no URL change */
+      }
+      applyCompMeta(c, lang);
+    },
+    [applyCompMeta, lang],
+  );
+
+  /** close the match dialog: pop back to the listing URL + restore its meta.
+   *  If the match was opened from the competition dialog (which stays
+   *  underneath), restore THAT dialog's meta instead. */
   const closeMatch = useCallback(() => {
     setSelected(null);
-    const day = date || today || initialDate;
-    restoreDayMeta(day, lang);
+    if (compSelected) {
+      applyCompMeta(compSelected, lang);
+    } else {
+      restoreDayMeta(date || today || initialDate, lang);
+    }
     if (pushedMatchUrl.current) {
       pushedMatchUrl.current = false;
       try {
@@ -190,22 +229,84 @@ export function HomeClient({
         /* ignore */
       }
     }
+  }, [date, today, lang, initialDate, compSelected, applyCompMeta, restoreDayMeta]);
+
+  /** close the competition dialog: pop back to the listing URL + restore meta */
+  const closeCompetition = useCallback(() => {
+    setCompSelected(null);
+    restoreDayMeta(date || today || initialDate, lang);
+    if (pushedCompUrl.current) {
+      pushedCompUrl.current = false;
+      try {
+        window.history.back();
+      } catch {
+        /* ignore */
+      }
+    }
   }, [date, today, lang, initialDate, restoreDayMeta]);
 
-  // browser BACK from a pushed /match/<id> URL: close the dialog + restore
-  // the listing meta (pushState does not trigger this on its own)
+  /**
+   * Switch the UI language AND keep everything a crawler sees consistent:
+   * an open dialog moves to its new-language URL (replaceState) and its
+   * meta switches to the new language's strings.
+   */
+  const switchLang = useCallback(
+    (next: Lang) => {
+      setLang(next);
+      if (selected) {
+        try {
+          window.history.replaceState(
+            { mcMatch: selected.matchId },
+            "",
+            matchUrlFor(selected.matchId, selected, next),
+          );
+        } catch {
+          /* ignore */
+        }
+        applyMatchMeta(selected, next);
+      } else if (compSelected) {
+        try {
+          window.history.replaceState(
+            { mcCompetition: compSelected.id },
+            "",
+            compUrlFor(compSelected.id, compSelected, next),
+          );
+        } catch {
+          /* ignore */
+        }
+        applyCompMeta(compSelected, next);
+      }
+    },
+    [selected, compSelected, applyMatchMeta, applyCompMeta],
+  );
+
+  // browser BACK from a pushed /match/<id> or /competition/<id> URL: close
+  // the corresponding dialog + restore the right meta (pushState does not
+  // trigger a popstate on its own)
   useEffect(() => {
     const onPopState = () => {
-      const onMatchUrl = window.location.pathname.startsWith("/match/");
+      const path = window.location.pathname;
+      const onMatchUrl = path.startsWith("/match/");
+      const onCompUrl = path.startsWith("/competition/");
       if (!onMatchUrl && pushedMatchUrl.current) {
         pushedMatchUrl.current = false;
         setSelected(null);
+      }
+      if (!onCompUrl && pushedCompUrl.current) {
+        pushedCompUrl.current = false;
+        setCompSelected(null);
+      }
+      // restore the meta of whatever is now on screen: the competition (if
+      // its dialog is still open underneath) or the day listing
+      if (onCompUrl && compSelected) {
+        applyCompMeta(compSelected, lang);
+      } else if (!onMatchUrl) {
         restoreDayMeta(date || today || initialDate, lang);
       }
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [date, today, lang, initialDate, restoreDayMeta]);
+  }, [date, today, lang, initialDate, compSelected, applyCompMeta, restoreDayMeta]);
 
   // shareable/crawlable URLs: reflect the selected day in ?date= (no reload,
   // no re-render - pure history state so crawlers and users get distinct URLs)
@@ -460,7 +561,7 @@ export function HomeClient({
             <div className="flex overflow-hidden rounded border border-white/40" role="group" aria-label="Language">
               <button
                 type="button"
-                onClick={() => setLang("ar")}
+                onClick={() => switchLang("ar")}
                 className={`px-3 py-1 text-[12px] font-bold transition-colors ${
                   lang === "ar" ? "bg-white text-[#17457f]" : "text-white/80 hover:bg-white/10"
                 }`}
@@ -469,7 +570,7 @@ export function HomeClient({
               </button>
               <button
                 type="button"
-                onClick={() => setLang("en")}
+                onClick={() => switchLang("en")}
                 className={`px-3 py-1 text-[12px] font-bold transition-colors ${
                   lang === "en" ? "bg-white text-[#17457f]" : "text-white/80 hover:bg-white/10"
                 }`}
@@ -575,7 +676,7 @@ export function HomeClient({
                   groups={filteredGroups}
                   lang={lang}
                   onOpen={openMatch}
-                  onOpenCompetition={setCompSelected}
+                  onOpenCompetition={openCompetition}
                 />
               )}
             </>
@@ -594,7 +695,7 @@ export function HomeClient({
       <CompetitionDialog
         competition={compSelected}
         lang={lang}
-        onClose={() => setCompSelected(null)}
+        onClose={closeCompetition}
         onOpenMatch={openMatch}
       />
 

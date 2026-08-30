@@ -5,7 +5,11 @@ import { useRouter } from "next/navigation";
 import { Loader2, Trophy } from "lucide-react";
 import type { Lang, MatchDetail, MatchRow } from "@/lib/goal/types";
 import { compLabel, formatDateTime, nameOf, t } from "@/lib/i18n";
-import { matchTitle } from "@/lib/seo";
+import {
+  matchDescription,
+  matchTitle,
+  matchUrlPair,
+} from "@/lib/seo";
 import { MatchDialog } from "./match-dialog";
 import { Crest } from "./crest";
 
@@ -47,23 +51,50 @@ export function MatchPageClient({
   const [failed, setFailed] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
 
-  // mount: read the persisted language preference (same convention as home)
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem("mc-lang");
-      if (saved === "en" || saved === "ar") setLang(saved);
-    } catch {
-      /* localStorage unavailable */
-    }
-  }, []);
-
   // keep <html lang/dir> + document.title in sync (SSR already rendered the
-  // correct values for the initial language)
+  // correct values for the URL's language - the URL itself carries it)
   useEffect(() => {
     document.documentElement.lang = lang;
     document.documentElement.dir = lang === "ar" ? "rtl" : "ltr";
     if (detail) document.title = matchTitle(detail, lang);
   }, [lang, detail]);
+
+  /**
+   * Switch language: the URL itself must follow (each language has its own
+   * slug URL), plus every crawler-facing tag that names it. A replaceState
+   * (not push) - switching language is not a history entry.
+   */
+  const switchLang = (next: Lang) => {
+    setLang(next);
+    if (!detail) return;
+    const pair = matchUrlPair(matchId, detail);
+    const path = next === "en" ? pair.en : pair.ar;
+    try {
+      window.history.replaceState({ mcMatch: matchId }, "", path);
+    } catch {
+      /* history unavailable - content still switches */
+    }
+    // sync the crawler-facing tags to the new language's URL/wording
+    document.title = matchTitle(detail, next);
+    document
+      .querySelector('meta[name="description"]')
+      ?.setAttribute("content", matchDescription(detail, next));
+    document
+      .querySelector('link[rel="canonical"]')
+      ?.setAttribute("href", path);
+    document
+      .querySelector('meta[property="og:url"]')
+      ?.setAttribute("content", path);
+    document
+      .querySelector('meta[property="og:title"]')
+      ?.setAttribute("content", matchTitle(detail, next));
+    document.querySelectorAll('link[rel="alternate"]').forEach((el) => {
+      const hl = el.getAttribute("hreflang");
+      if (hl === "ar") el.setAttribute("href", pair.ar);
+      else if (hl === "en") el.setAttribute("href", pair.en);
+      else if (hl === "x-default") el.setAttribute("href", pair.ar);
+    });
+  };
 
   // client-side fallback when SSR could not get the detail (slow backend) -
   // same endpoint the dialog uses, so the retry logic is identical
@@ -118,7 +149,7 @@ export function MatchPageClient({
             <div className="flex overflow-hidden rounded border border-white/40" role="group" aria-label="Language">
               <button
                 type="button"
-                onClick={() => setLang("ar")}
+                onClick={() => switchLang("ar")}
                 className={`px-3 py-1 text-[12px] font-bold transition-colors ${
                   lang === "ar" ? "bg-white text-[#17457f]" : "text-white/80 hover:bg-white/10"
                 }`}
@@ -127,7 +158,7 @@ export function MatchPageClient({
               </button>
               <button
                 type="button"
-                onClick={() => setLang("en")}
+                onClick={() => switchLang("en")}
                 className={`px-3 py-1 text-[12px] font-bold transition-colors ${
                   lang === "en" ? "bg-white text-[#17457f]" : "text-white/80 hover:bg-white/10"
                 }`}
