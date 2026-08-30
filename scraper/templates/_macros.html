@@ -1,0 +1,70 @@
+{# ------------------------------------------------------------------
+   Shared macros: team crest (served from the local cache) + one match
+   row + competition group header.
+
+   Accordions use <button> toggles instead of <details>/<summary> -
+   Safari renders flex-styled <summary> unreliably.
+------------------------------------------------------------------- #}
+
+{% macro crest(team_id, cls='crest') -%}
+<img class="{{ cls }}" src="{{ url_for('crest_route', team_id=team_id) }}" alt="" loading="lazy"
+     onerror="this.onerror=null;this.src='{{ url_for('static', filename='crest.svg') }}';this.classList.add('is-fallback')">
+{%- endmacro %}
+
+{% macro matchrow(m, lang) -%}
+{% set sp = score_parts(m) %}
+{% set st, stcls = status_label(m, lang) %}
+{% set status = (m['status'] or '') | upper %}
+{% set hwin = sp.show and sp.home > sp.away %}
+{% set awin = sp.show and sp.away > sp.home %}
+{% set hname = team_name({'name_en': m['h_name_en'], 'name_ar': m['h_name_ar']}, lang) %}
+{% set aname = team_name({'name_en': m['a_name_en'], 'name_ar': m['a_name_ar']}, lang) %}
+<a class="match" href="{{ url_for('match_page', match_id=m['id']) }}?lang={{ lang }}">
+  <div class="m-status {{ stcls }}">
+    <span class="main">{{ st }}</span>
+    {% if status not in ('FIXTURE', '') %}
+    <span class="sub tt" data-utc="{{ m['kickoff_utc'] }}">{{ kickoff_time(m['kickoff_utc']) }}</span>
+    {% endif %}
+  </div>
+  <div class="m-team m-home{{ ' win' if hwin }}">
+    {{ crest(m['h_id']) }}
+    <span class="t-name">{{ hname }}</span>
+    {% if sp.show %}<span class="t-score">{{ sp.home }}</span>{% endif %}
+  </div>
+  <div class="m-score" aria-hidden="true">
+    {% if sp.show %}
+      <span class="s{{ ' w' if hwin }}">{{ sp.home }}</span>
+      <span class="dash">-</span>
+      <span class="s{{ ' w' if awin }}">{{ sp.away }}</span>
+    {% endif %}
+  </div>
+  <div class="m-team m-away{{ ' win' if awin }}">
+    {{ crest(m['a_id']) }}
+    <span class="t-name">{{ aname }}</span>
+    {% if sp.show %}<span class="t-score">{{ sp.away }}</span>{% endif %}
+  </div>
+  {% if sp.pens %}
+  <div class="m-pens">{{ (sp.pens[0]) }}-{{ sp.pens[1] }} {{ 'ركلات' if lang == 'ar' else 'pens' }}</div>
+  {% endif %}
+</a>
+{%- endmacro %}
+
+{# Competition group: navy header bar (button toggle) + collapsible match list #}
+{% macro compheader(grp, lang, open) -%}
+<section class="comp{{ ' open' if open }}" data-acc>
+  <button class="comp-toggle" type="button" data-acc-btn aria-expanded="{{ 'true' if open else 'false' }}">
+    {% if grp.comp['c_id'] %}
+    <img class="comp-img" src="{{ url_for('compimg_route', comp_id=grp.comp['c_id']) }}" alt="" loading="lazy"
+         onerror="this.style.display='none'">
+    {% endif %}
+    <span class="comp-name">{{ comp_name({'name_en': grp.comp['c_name_en'], 'name_ar': grp.comp['c_name_ar']}, lang) }}</span>
+    {% if grp.live %}<span class="live-chip">{{ 'مباشر' if lang == 'ar' else 'LIVE' }}</span>{% endif %}
+    <span class="comp-area">{{ area_name({'area_name_en': grp.comp['c_area_en'], 'area_name_ar': grp.comp['c_area_ar']}, lang) }}</span>
+    <span class="comp-count">{{ grp.matches | length }}</span>
+    <svg class="chev" width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4.5l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+  <div class="comp-body">
+    {% for m in grp.matches %}{{ matchrow(m, lang) }}{% endfor %}
+  </div>
+</section>
+{%- endmacro %}

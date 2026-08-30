@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="{{ 'ar' if lang == 'ar' else 'en' }}" dir="{{ dir }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ 'نتائج ومواعيد كرة القدم' if lang == 'ar' else 'Football Results & Fixtures' }}{% endblock %}</title>
+  {% if live_refresh %}<meta http-equiv="refresh" content="120">{% endif %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="icon" href="{{ url_for('static', filename='crest.svg') }}">
+</head>
+<body>
+  <div class="sticky-wrap">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="/" style="display:flex;align-items:center;gap:8px">
+          <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="#fff" stroke-width="2"/><path d="M12 7.2l4.6 3.3-1.8 5.4H9.2L7.4 10.5z" fill="#fff"/><path d="M12 2v5.2M21.5 9.5l-4.9 1M19 20l-4.2-4.1M5 20l4.2-4.1M2.5 9.5l4.9 1" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <span>{{ 'نتائج ومواعيد كرة القدم' if lang == 'ar' else 'FOOTBALL RESULTS' }}</span>
+        </a>
+        <a class="topbar-link" href="/">{% if lang == 'ar' %}اليوم{% else %}Today{% endif %}</a>
+        <a class="lang-btn" href="{{ toggle_url(lang='ar' if lang == 'en' else 'en') }}">
+          {{ 'English' if lang == 'ar' else 'العربية' }}
+        </a>
+      </div>
+    </header>
+    {% block datenav %}{% endblock %}
+  </div>
+
+  <main class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer>
+    <div>{{ 'بيانات من goal.com · مشروع football-scraper' if lang == 'ar' else 'Data scraped from goal.com &middot; football-scraper project' }}</div>
+  </footer>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

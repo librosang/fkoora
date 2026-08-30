@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+{% import "_macros.html" as macros with context %}
+
+{% set sp = score_parts(m) %}
+{% set status = (m['status'] or '') | upper %}
+{% set st, stcls = status_label(m, lang) %}
+{% set hname = team_name({'name_en': m['h_name_en'], 'name_ar': m['h_name_ar']}, lang) %}
+{% set aname = team_name({'name_en': m['a_name_en'], 'name_ar': m['a_name_ar']}, lang) %}
+
+{% set has_events = data.events | length > 0 %}
+{% set has_lineups = data.lineups | length > 0 %}
+{% set has_stats = stats_rows | length > 0 %}
+{% set tab_count = (has_events | int) + (has_lineups | int) + (has_stats | int) %}
+{% set use_tabs = tab_count >= 2 %}
+{% set active_panel = 'events' if has_events else ('lineups' if has_lineups else 'stats') %}
+
+{% block title %}{{ hname }} {{ (sp.home ~ ' - ' ~ sp.away) if sp.show else 'vs' }} {{ aname }}{% endblock %}
+
+{% block content %}
+<nav class="backnav">
+  <a href="{{ url_for('day_page', day=match_day) }}?lang={{ lang }}">
+    {% if dir == 'rtl' %}&#10095;{% else %}&#10094;{% endif %}
+    {{ 'عودة إلى ' ~ human_date(match_day, lang) if lang == 'ar' else 'Back to ' ~ human_date(match_day, lang) }}
+  </a>
+</nav>
+
+<div class="matchcard">
+  <div class="mc-comp">
+    {% if m['c_id'] %}
+    <img src="{{ url_for('compimg_route', comp_id=m['c_id']) }}" alt="" loading="lazy"
+         onerror="this.style.display='none'">
+    {% endif %}
+    <span class="mc-comp-name">{{ comp_name({'name_en': m['c_name_en'], 'name_ar': m['c_name_ar']}, lang) }}</span>
+    <span class="mc-comp-meta">
+      {{ (m['gameset_name_ar'] or m['gameset_name'] or m['round_name']) if lang == 'ar' else (m['gameset_name'] or m['round_name']) or '' }}
+    </span>
+  </div>
+
+  <div class="scoreboard">
+    <div class="sb-grid">
+      <div class="sb-name">{{ hname }}</div>
+      <div class="sb-scorebox">
+        {% if sp.show %}
+        <div class="sb-score">
+          <span class="{{ 'w' if sp.home > sp.away }}">{{ sp.home }}</span>
+          <span class="sb-dash">-</span>
+          <span class="{{ 'w' if sp.away > sp.home }}">{{ sp.away }}</span>
+        </div>
+        {% else %}
+        <div class="sb-score sb-vs">{{ 'ضد' if lang == 'ar' else 'VS' }}</div>
+        {% endif %}
+        <div class="sb-status {{ stcls }}">
+          {% if status == 'LIVE' %}{{ 'مباشر · ' if lang == 'ar' else 'LIVE · ' }}{{ pretty_period(m['period'], lang) }}
+          {% elif status == 'RESULT' %}{{ 'انتهت المباراة' if lang == 'ar' else 'Full time' }}{% if sp.aet %} · {{ 'بعد وقت إضافي' if lang == 'ar' else 'AET' }}{% endif %}
+          {% elif status in ('POSTPONED','CANCELLED','SUSPENDED','ABANDONED') %}{{ st }}
+          {% else %}{{ 'انطلاق' if lang == 'ar' else 'Kick-off' }}{% endif %}
+        </div>
+        {% if sp.pens %}
+        <div class="sb-pens">{{ sp.pens[0] }}-{{ sp.pens[1] }} {{ 'بركلات الترجيح' if lang == 'ar' else 'on penalties' }}</div>
+        {% endif %}
+      </div>
+      <div class="sb-name">{{ aname }}</div>
+
+      <div class="sb-crest">{{ macros.crest(m['h_id'], 'sb-crest-img') }}</div>
+      <div class="sb-h2h"><span class="tt" data-utc="{{ m['kickoff_utc'] }}">{{ kickoff_time(m['kickoff_utc']) }}</span></div>
+      <div class="sb-crest">{{ macros.crest(m['a_id'], 'sb-crest-img') }}</div>
+    </div>
+
+    {% if status == 'LIVE' and sp.show %}
+    <div class="sb-live">
+      <span class="live-dot"></span>{{ 'المباشر' if lang == 'ar' else 'Live now' }} · {{ st }}
+    </div>
+    {% endif %}
+
+    <div class="meta-chips">
+      <span class="chip"><span class="tt" data-utc="{{ m['kickoff_utc'] }}" data-full="1">{{ kickoff_time(m['kickoff_utc']) }}</span></span>
+      {% if venue %}
+      <span class="chip">{{ (venue['name_ar'] or venue['name_en']) if lang == 'ar' else (venue['name_en'] or venue['name_ar']) }}</span>
+      {% endif %}
+      {% if m['referee'] %}
+      <span class="chip">{{ 'الحكم:' if lang == 'ar' else 'Referee:' }} {{ m['referee'] }}</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if use_tabs %}
+<nav class="tabs" role="tablist">
+  {% if has_events %}
+  <button class="tab{{ ' active' if active_panel == 'events' }}" type="button" role="tab"
+          data-tab="events" aria-selected="{{ 'true' if active_panel == 'events' else 'false' }}">
+    {{ 'الأحداث' if lang == 'ar' else 'Events' }}</button>
+  {% endif %}
+  {% if has_lineups %}
+  <button class="tab{{ ' active' if active_panel == 'lineups' }}" type="button" role="tab"
+          data-tab="lineups" aria-selected="{{ 'true' if active_panel == 'lineups' else 'false' }}">
+    {{ 'التشكيلات' if lang == 'ar' else 'Lineups' }}</button>
+  {% endif %}
+  {% if has_stats %}
+  <button class="tab{{ ' active' if active_panel == 'stats' }}" type="button" role="tab"
+          data-tab="stats" aria-selected="{{ 'true' if active_panel == 'stats' else 'false' }}">
+    {{ 'الإحصائيات' if lang == 'ar' else 'Stats' }}</button>
+  {% endif %}
+</nav>
+{% endif %}
+
+{% if has_events %}
+<section class="sec{{ ' tab-panel' if use_tabs }}{{ ' active' if use_tabs and active_panel == 'events' }}" id="{{ 'panel-events' if use_tabs }}">
+  {% if not use_tabs %}
+  <div class="sec-h">
+    <svg width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="#fff" stroke-width="2"/><path d="M12 8l3.4 2.4-1.3 4H9.9l-1.3-4z" fill="#fff"/></svg>
+    {{ 'أحداث المباراة' if lang == 'ar' else 'Match Events' }}
+  </div>
+  {% endif %}
+  <div class="events">
+    {% for e in data.events %}
+    {% set ev = e['event_type'] %}
+    {% set pname = (e['player_name_ar'] or e['player_name_en']) if lang == 'ar' else (e['player_name_en'] or e['player_name_ar']) %}
+    {% set rname = (e['related_player_name_ar'] or e['related_player_name_en']) if lang == 'ar' else (e['related_player_name_en'] or e['related_player_name_ar']) %}
+    <div class="ev">
+      <span class="min">{% if e['minute'] is not none %}{{ e['minute'] }}{% if e['extra_minute'] %}+{{ e['extra_minute'] }}{% endif %}'{% else %}-{% endif %}</span>
+      <span class="ev-crest">
+        {% if e['team_side'] == 'home' %}{{ macros.crest(m['h_id'], 'crest-s') }}
+        {% elif e['team_side'] == 'away' %}{{ macros.crest(m['a_id'], 'crest-s') }}{% endif %}
+      </span>
+      <span class="ico">
+        {% if ev == 'GOAL' or ev == 'GOAL_PENALTY' or ev == 'GOAL_PENALTY_SHOOTOUT' %}
+          <svg width="15" height="15" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="#1e7e34" stroke-width="2"/><path d="M12 8l3.4 2.4-1.3 4H9.9l-1.3-4z" fill="#1e7e34"/></svg>
+        {% elif ev == 'GOAL_OWN' %}
+          <svg width="15" height="15" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="#b02a30" stroke-width="2"/><path d="M12 8l3.4 2.4-1.3 4H9.9l-1.3-4z" fill="#b02a30"/></svg>
+        {% elif ev == 'GOAL_PENALTY_MISS' or ev == 'GOAL_PENALTY_SHOOTOUT_MISS' %}
+          <svg width="15" height="15" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="#8a94a6" stroke-width="2"/><path d="M8 8l8 8M16 8l-8 8" stroke="#8a94a6" stroke-width="2" stroke-linecap="round"/></svg>
+        {% elif ev == 'CARD_YELLOW' %}
+          <svg width="12" height="15" viewBox="0 0 12 15"><rect x="1" y="1" width="10" height="13" rx="2" fill="#f0c419"/></svg>
+        {% elif ev == 'CARD_RED' or ev == 'CARD_SECOND_YELLOW' %}
+          <svg width="12" height="15" viewBox="0 0 12 15"><rect x="1" y="1" width="10" height="13" rx="2" fill="#d21f26"/></svg>
+        {% elif ev == 'SUBSTITUTION' %}
+          <svg width="15" height="15" viewBox="0 0 24 24"><path d="M7 4v12M7 16l-3-3M7 16l3-3" fill="none" stroke="#1e7e34" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M17 20V8m0 12l-3-3m3 3l3-3" fill="none" stroke="#b02a30" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        {% elif ev.startswith('VAR') %}
+          <svg width="15" height="15" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2" fill="none" stroke="#5b6b85" stroke-width="2"/><path d="M9 21h6" stroke="#5b6b85" stroke-width="2" stroke-linecap="round"/></svg>
+        {% else %}
+          <svg width="15" height="15" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="#8a94a6"/></svg>
+        {% endif %}
+      </span>
+      <span class="who">
+        {% if ev == 'SUBSTITUTION' %}
+          <b>{{ pname or '-' }}</b>
+          <span class="ev-sub">
+            <span class="arr in">&#8593;</span>{{ rname or '' }}
+          </span>
+        {% else %}
+          <b>{{ pname or (e['event_type']) }}</b>
+          {% if rname and (ev == 'GOAL') %}<span class="ev-note">{{ 'صناعة:' if lang == 'ar' else 'assist:' }} {{ rname }}</span>{% endif %}
+          {% if ev == 'GOAL_PENALTY' or ev == 'GOAL_PENALTY_SHOOTOUT' %}<span class="ev-note">({{ 'جزاء' if lang == 'ar' else 'pen' }})</span>{% endif %}
+          {% if ev == 'GOAL_OWN' %}<span class="ev-note">({{ 'عكسي' if lang == 'ar' else 'OG' }})</span>{% endif %}
+          {% if ev in ('GOAL_PENALTY_MISS','GOAL_PENALTY_SHOOTOUT_MISS') %}<span class="ev-note">({{ 'ضائعة' if lang == 'ar' else 'missed' }})</span>{% endif %}
+          {% if ev == 'CARD_SECOND_YELLOW' %}<span class="ev-note">({{ 'صفراء ثانية' if lang == 'ar' else '2nd yellow' }})</span>{% endif %}
+          {% if ev == 'VAR_GOAL_AWARDED' %}<span class="ev-note">{{ 'الفار: احتُسب الهدف' if lang == 'ar' else 'VAR: goal awarded' }}</span>{% endif %}
+          {% if ev == 'VAR_PENALTY_NOT_AWARDED' %}<span class="ev-note">{{ 'الفار: لم تُحتسب ركلة جزاء' if lang == 'ar' else 'VAR: penalty not awarded' }}</span>{% endif %}
+        {% endif %}
+      </span>
+      {% if e['home_score_after'] is not none %}
+      <span class="runscore">{{ e['home_score_after'] }}-{{ e['away_score_after'] }}</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if has_lineups %}
+<section class="sec{{ ' tab-panel' if use_tabs }}{{ ' active' if use_tabs and active_panel == 'lineups' }}" id="{{ 'panel-lineups' if use_tabs }}">
+  {% if not use_tabs %}
+  <div class="sec-h">
+    <svg width="14" height="14" viewBox="0 0 24 24"><path d="M4 20V10l8-6 8 6v10h-5v-6h-6v6z" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/></svg>
+    {{ 'التشكيلات' if lang == 'ar' else 'Lineups' }}
+  </div>
+  {% endif %}
+  <div class="lineups">
+    {% for t in lineup_teams %}
+    <div class="lu-team">
+      <div class="lu-h">
+        {{ macros.crest(t.id, 'crest-s') }}
+        <span class="lu-name">{{ team_name({'name_en': t.name_en, 'name_ar': t.name_ar}, lang) }}</span>
+        {% if t.manager %}
+        <span class="lu-mgr">{{ (t.manager['manager_name_ar'] or t.manager['manager_name_en']) if lang == 'ar' else (t.manager['manager_name_en'] or t.manager['manager_name_ar']) }}</span>
+        {% endif %}
+      </div>
+      {% if t.starters %}
+      <div class="lu-rows">
+        {% for p in t.starters %}
+        <div class="lu-row">
+          <span class="num">{{ p['shirt_number'] if p['shirt_number'] is not none else '' }}</span>
+          <span class="lu-pname">{{ (p['p_name_ar'] or p['p_name_en']) if lang == 'ar' else (p['p_name_en'] or p['p_name_ar']) or '-' }}</span>
+          {% if p['is_captain'] %}<span class="cap">C</span>{% endif %}
+          {% if p['rating'] is not none %}<span class="rating{{ ' low' if p['rating'] < 6.0 }}">{{ '%.1f' % p['rating'] }}</span>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if t.bench %}
+      <div class="lu-bench" data-acc>
+        <button class="bench-toggle" type="button" data-acc-btn aria-expanded="false">
+          {{ 'بدلاء (' ~ (t.bench | length) ~ ')' if lang == 'ar' else 'Bench (' ~ (t.bench | length) ~ ')' }}
+        </button>
+        <div class="lu-rows bench">
+          {% for p in t.bench %}
+          <div class="lu-row">
+            <span class="num">{{ p['shirt_number'] if p['shirt_number'] is not none else '' }}</span>
+            <span class="lu-pname">{{ (p['p_name_ar'] or p['p_name_en']) if lang == 'ar' else (p['p_name_en'] or p['p_name_ar']) or '-' }}</span>
+            {% if p['is_captain'] %}<span class="cap">C</span>{% endif %}
+            {% if p['rating'] is not none %}<span class="rating{{ ' low' if p['rating'] < 6.0 }}">{{ '%.1f' % p['rating'] }}</span>{% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if has_stats %}
+<section class="sec{{ ' tab-panel' if use_tabs }}{{ ' active' if use_tabs and active_panel == 'stats' }}" id="{{ 'panel-stats' if use_tabs }}">
+  {% if not use_tabs %}
+  <div class="sec-h">
+    <svg width="14" height="14" viewBox="0 0 24 24"><path d="M4 20V14M10 20V8M16 20v-9M4 20h16" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+    {{ 'إحصائيات المباراة' if lang == 'ar' else 'Match Stats' }}
+  </div>
+  {% endif %}
+  <div class="stats">
+    {% for s in stats_rows %}
+    <div class="stat-row">
+      <div class="stat-line">
+        <span class="v-h">{{ s.home_str }}</span>
+        <span class="lbl">{{ s.label }}</span>
+        <span class="v-a">{{ s.away_str }}</span>
+      </div>
+      <div class="bars">
+        <div class="bar-h" style="width: {{ '%.0f' % (s.home_ratio * 100) }}%"></div>
+        <div class="bar-a" style="width: {{ '%.0f' % (s.away_ratio * 100) }}%"></div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if tab_count == 0 %}
+<div class="empty">
+  <p>{{ 'لم يتم جلب تفاصيل هذه المباراة بعد.' if lang == 'ar' else 'Match details (events, lineups, stats) have not been scraped yet.' }}</p>
+  <p class="hint"><code>python -m scraper enrich --date {{ match_day }}</code></p>
+</div>
+{% endif %}
+{% endblock %}

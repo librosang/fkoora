@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% import "_macros.html" as macros with context %}
+
+{% block title %}{{ human_date(day, lang) }} | {{ 'النتائج' if mode == 'results' else ('مباريات اليوم' if mode == 'today' else 'المواعيد') if lang == 'ar' else ('Results' if mode == 'results' else ('Live Scores' if mode == 'today' else 'Fixtures')) }}{% endblock %}
+
+{% block datenav %}
+<nav class="datenav">
+  <div class="datenav-inner">
+    <a class="nav-arrow" href="{{ url_for('day_page', day=prev_day) }}?lang={{ lang }}" aria-label="Previous day">
+      {% if dir == 'rtl' %}&#9654;{% else %}&#9664;{% endif %}
+    </a>
+    <label class="datebox" for="datepick">
+      <span class="date-pretty">{{ human_date(day, lang) }}</span>
+      <span class="date-mode">
+        {{ ('النتائج' if mode == 'results' else ('مباريات اليوم' if mode == 'today' else 'المواعيد القادمة')) if lang == 'ar' else ('Results' if mode == 'results' else ('Today · Live Scores' if mode == 'today' else 'Fixtures')) }}
+      </span>
+      <input type="date" id="datepick" value="{{ day }}" data-base="/day/" data-qs="?lang={{ lang }}">
+    </label>
+    <a class="nav-arrow" href="{{ url_for('day_page', day=next_day) }}?lang={{ lang }}" aria-label="Next day">
+      {% if dir == 'rtl' %}&#9664;{% else %}&#9654;{% endif %}
+    </a>
+    <a class="nav-today" href="/?lang={{ lang }}">{{ 'اليوم' if lang == 'ar' else 'Today' }}</a>
+  </div>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="modestrip">
+  {% if total %}
+    <span class="count-chip">{{ total }} {{ 'مباراة' if lang == 'ar' else 'matches' }}</span>
+    {% if counts.result %}<span class="count-chip">{{ counts.result }} {{ 'منتهية' if lang == 'ar' else 'finished' }}</span>{% endif %}
+    {% if counts.live %}<span class="count-chip live">{{ counts.live }} {{ 'مباشر' if lang == 'ar' else 'live' }}</span>{% endif %}
+    {% if counts.fixture %}<span class="count-chip">{{ counts.fixture }} {{ 'قادمة' if lang == 'ar' else 'upcoming' }}</span>{% endif %}
+    <span class="tz-note">{{ 'الأوقات بتوقيت جهازك' if lang == 'ar' else 'Times shown in your local timezone' }}</span>
+  {% endif %}
+</div>
+
+{% if total == 0 %}
+<div class="empty">
+  <div class="empty-ball">
+    <svg width="42" height="42" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#b9c4d6" stroke-width="1.6"/><path d="M12 7.2l4.6 3.3-1.8 5.4H9.2L7.4 10.5z" fill="#b9c4d6"/></svg>
+  </div>
+  <p>{{ 'لا توجد مباريات مسجلة في هذا التاريخ.' if lang == 'ar' else 'No matches found in the database for this date.' }}</p>
+  <p class="hint"><code>python -m scraper date {{ day }}</code></p>
+</div>
+{% else %}
+  {% for grp in groups %}{{ macros.compheader(grp, lang, grp.open) }}{% endfor %}
+{% endif %}
+{% endblock %}
