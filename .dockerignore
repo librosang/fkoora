@@ -1,0 +1,16 @@
+# Never send these into a Docker build context.
+.git
+.next
+node_modules
+download
+scripts
+examples
+img_cache
+crest_cache
+scraper.log
+dev.log
+server.log
+*.zip
+.env
+.env.local
+.vercel

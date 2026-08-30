@@ -1,0 +1,52 @@
+# Flask JSON API (scraper/) - production image, served by gunicorn.
+#
+# Build context: repository root (needs requirements.txt + scraper/).
+#   docker build -t fkoora-api -f Dockerfile .
+#
+# Runtime configuration (environment):
+#   FOOTBALL_DB_URL          postgresql://user:pass@host:5432/db   (required)
+#   API_ENABLE_SCHEDULER     1 (default) - keep the DB fresh in-process
+#                            0 - external cron calls /api/cron/refresh
+#   API_CRON_SECRET          shared secret for /api/cron/refresh (empty = open)
+#   IMG_CACHE_DIR            crest/logo disk cache (default /app/img_cache)
+#
+# The schema is applied idempotently on first start (CREATE TABLE IF NOT
+# EXISTS inside scraper/db/schema.sql) - a fresh database needs no manual
+# setup step. First data arrives with the first scheduler tick.
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+  PYTHONUNBUFFERED=1 \
+  PIP_NO_CACHE_DIR=1 \
+  IMG_CACHE_DIR=/app/img_cache
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Only the Python package ships in this image (schema.sql lives inside it).
+COPY scraper/ ./scraper/
+
+RUN mkdir -p /app/img_cache
+
+EXPOSE 9000
+
+# One worker on purpose: exactly one scheduler thread then scrapes goal.com
+# (multiple workers would duplicate every scrape and race on the same rows).
+# Long timeout: on-demand scrape/detail endpoints can legitimately be slow.
+CMD ["gunicorn", \
+  "--bind", "0.0.0.0:9000", \
+  "--workers", "1", \
+  "--threads", "8", \
+  "--timeout", "180", \
+  "--graceful-timeout", "30", \
+  "--access-logfile", "-", \
+  "--error-logfile", "-", \
+  "scraper.wsgi:app"]
+
+# Deep healthcheck: /api/health opens a real DB connection and reports counts.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 \
+  CMD python -c "import urllib.request,sys; \
+  sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9000/api/health', timeout=4).status == 200 else 1)"
