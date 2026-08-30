@@ -5,14 +5,45 @@
 import type { Lang, ListingResponse, MatchRow, TeamRef } from "@/lib/goal/types";
 import { compLabel, formatDateTime } from "@/lib/i18n";
 
-/** Absolute site URL (no trailing slash) - env first, then Vercel, then dev. */
+/** Private production domain - the FINAL fallback so a missing env var can
+ *  never leak http://localhost:3000 into canonicals, OG tags or sitemaps. */
+const PRODUCTION_SITE_URL = "https://fkoora.site";
+
+/** Normalize a configured site URL: ensure protocol, strip trailing slashes. */
+function normalizeSiteUrl(url: string): string {
+  let v = url.trim();
+  if (v && !/^https?:\/\//i.test(v)) v = `https://${v}`;
+  return v.replace(/\/+$/, "");
+}
+
+/**
+ * Absolute site URL (no trailing slash).
+ *
+ * Resolution order:
+ *  1. SITE_URL              - RUNTIME override. Plain env vars are read at
+ *                             request time by the server (sitemap.xml,
+ *                             robots.txt, page metadata), so exporting
+ *                             SITE_URL on the running server (standalone
+ *                             `server.js`, Docker, VPS...) changes every
+ *                             generated URL WITHOUT a rebuild.
+ *  2. NEXT_PUBLIC_SITE_URL  - build-time value. NEXT_PUBLIC_* variables are
+ *                             INLINED when the app is compiled: after
+ *                             changing .env you must run `next build` again
+ *                             (the standalone server ignores .env changes).
+ *  3. VERCEL_PROJECT_PRODUCTION_URL / VERCEL_URL - automatic on Vercel.
+ *  4. https://fkoora.site   - this site's real production domain. localhost
+ *                             must never appear in production metadata, so
+ *                             it is not part of the fallback chain.
+ */
 export function siteUrl(): string {
-  const explicit = process.env.NEXT_PUBLIC_SITE_URL;
-  if (explicit && explicit.trim()) return explicit.trim().replace(/\/+$/, "");
+  const runtime = process.env.SITE_URL;
+  if (runtime && runtime.trim()) return normalizeSiteUrl(runtime);
+  const buildTime = process.env.NEXT_PUBLIC_SITE_URL;
+  if (buildTime && buildTime.trim()) return normalizeSiteUrl(buildTime);
   const vurl =
     process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
-  if (vurl) return `https://${vurl}`;
-  return "http://localhost:3000";
+  if (vurl && vurl.trim()) return `https://${vurl.trim()}`;
+  return PRODUCTION_SITE_URL;
 }
 
 /** metadataBase-safe URL (an invalid env value must never throw the build). */
@@ -20,7 +51,7 @@ export function safeMetaBase(): URL {
   try {
     return new URL(siteUrl());
   } catch {
-    return new URL("http://localhost:3000");
+    return new URL(PRODUCTION_SITE_URL);
   }
 }
 
@@ -105,8 +136,62 @@ function teamName(m: MatchRow, side: "home" | "away", lang: Lang): string {
 }
 
 // ---------------------------------------------------------------------------
-// match page (per-match URLs: /match/<id>)
+// match page (per-match URLs: /match/<id>/<home>-vs-<away>)
 // ---------------------------------------------------------------------------
+
+/** Characters kept in URL slugs: a-z, 0-9 and Arabic letters. */
+const SLUG_DISALLOWED = /[^a-z0-9\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]+/g;
+
+/**
+ * URL-slugify a name: strip accents (é -> e), lowercase, keep Latin/digits/
+ * Arabic letters, everything else becomes a hyphen. "Bayern München" ->
+ * "bayern-munchen", "الهلال" stays Arabic (percent-encoded when placed in a
+ * URL). Returns "" when nothing usable remains.
+ */
+export function slugifyText(input: string | null | undefined): string {
+  if (!input) return "";
+  const slug = input
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036F]/g, "")
+    .toLowerCase()
+    .replace(SLUG_DISALLOWED, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug;
+}
+
+/** Max combined slug length - long club names must not bloat the URL. */
+const MATCH_SLUG_MAX = 80;
+
+/**
+ * Canonical slug of a match: "<home>-vs-<away>" from the English team names
+ * (Arabic fallback), e.g. "real-madrid-vs-bayern-munich". The slug is
+ * language-neutral (always English when available) so the ar/en hreflang
+ * pair shares ONE url. Returns "" when neither team has a usable name.
+ */
+export function matchSlug(m: {
+  homeTeam: TeamRef;
+  awayTeam: TeamRef;
+}): string {
+  const home = slugifyText(m.homeTeam?.nameEn || m.homeTeam?.nameAr);
+  const away = slugifyText(m.awayTeam?.nameEn || m.awayTeam?.nameAr);
+  let slug = home && away ? `${home}-vs-${away}` : home || away;
+  if (slug.length > MATCH_SLUG_MAX) {
+    slug = slug.slice(0, MATCH_SLUG_MAX).replace(/-+$/g, "");
+  }
+  return slug;
+}
+
+/**
+ * Path of a match page: "/match/<id>/<slug>" ("/match/<id>" when no slug is
+ * derivable). The slug is percent-encoded, so Arabic fallback slugs produce
+ * valid URLs. Used EVERYWHERE (page metadata, JSON-LD, sitemap, client
+ * pushState) so every generated match URL is identical.
+ */
+export function matchUrlPath(matchId: string, slug: string): string {
+  const id = encodeURIComponent(matchId);
+  return slug ? `/match/${id}/${encodeURIComponent(slug)}` : `/match/${id}`;
+}
 /** Structural subset shared by MatchRow and MatchDetail. */
 export interface MatchMetaInput {
   matchId?: string;
@@ -176,7 +261,7 @@ export function matchJsonLd(m: MatchMetaInput & { matchId: string }, lang: Lang)
   const home = displayName(m.homeTeam, lang);
   const away = displayName(m.awayTeam, lang);
   const hasScore = m.homeScore !== null && m.awayScore !== null && m.status !== "FIXTURE";
-  const url = `${base}/match/${encodeURIComponent(m.matchId)}`;
+  const url = `${base}${matchUrlPath(m.matchId, matchSlug(m))}`;
 
   const event: Record<string, unknown> = {
     "@type": "SportsEvent",
@@ -272,7 +357,7 @@ export function buildListingJsonLd(
       "@type": "SportsEvent",
       name: lang === "ar" ? `${home} ضد ${away}` : `${home} vs ${away}`,
       sport: lang === "ar" ? "كرة القدم" : "Football",
-      url: `${base}/match/${encodeURIComponent(m.matchId)}`,
+      url: `${base}${matchUrlPath(m.matchId, matchSlug(m))}`,
       isAccessibleForFree: true,
       eventAttendanceMode: "https://schema.org/OnlineEventAttendanceMode",
       eventStatus: "https://schema.org/EventScheduled",

@@ -11,7 +11,9 @@ import type {
 import { localToday, t } from "@/lib/i18n";
 import {
   matchDescription,
+  matchSlug,
   matchTitle,
+  matchUrlPath,
   pageDescription,
   pageTitle,
 } from "@/lib/seo";
@@ -152,18 +154,19 @@ export function HomeClient({
       ?.setAttribute("content", pageDescription(d, t0, lang));
   }, []);
 
-  /** open a match: dialog + shareable/crawlable URL + match SEO meta */
+  /** open a match: dialog + shareable/crawlable slug URL + match SEO meta */
   const openMatch = useCallback(
     (m: MatchRow) => {
       setSelected(m);
       try {
         // soft navigation: the listing stays mounted and the dialog opens on
         // top, but the URL (and everything a crawler sees when it later fetches
-        // this URL server-side) becomes the match's own page
+        // this URL server-side) becomes the match's own slug page
+        // (/match/<id>/<home>-vs-<away> - identical to the server canonical)
         window.history.pushState(
           { mcMatch: m.matchId },
           "",
-          `/match/${encodeURIComponent(m.matchId)}`,
+          matchUrlPath(m.matchId, matchSlug(m)),
         );
         pushedMatchUrl.current = true;
       } catch {
