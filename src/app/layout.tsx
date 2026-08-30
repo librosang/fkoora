@@ -127,7 +127,7 @@ function pageLang(pathWithSearch: string): "ar" | "en" {
   // Arabic letters percent-encode into UTF-8 bytes D8../D9.. -> Arabic slug
   if (/%D[89]%[0-9A-Fa-f]{2}/i.test(path)) return "ar";
   // ASCII-only slug on entity pages -> the English slug variant
-  if (/^\/(match|competition)\/[^/]+\/[a-z0-9-]+$/i.test(path)) return "en";
+  if (/^\/(match|competition|team|player)\/[^/]+\/[a-z0-9-]+$/i.test(path)) return "en";
   return "ar";
 }
 

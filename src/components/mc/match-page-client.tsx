@@ -1,18 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Trophy } from "lucide-react";
-import type { Lang, MatchDetail, MatchRow } from "@/lib/goal/types";
+import type { Lang, MatchDetail, MatchRow, TeamRef } from "@/lib/goal/types";
 import { compLabel, formatDateTime, nameOf, t } from "@/lib/i18n";
 import {
   matchDescription,
   matchTitle,
   matchUrlPair,
+  playerDescription,
+  playerTitle,
+  playerUrlFor,
+  teamUrlFor,
 } from "@/lib/seo";
 import { MatchDialog } from "./match-dialog";
-import { TeamDialog } from "./team-dialog";
-import { PlayerDialog } from "./player-dialog";
+import { PlayerDialog, type PlayerDialogTarget } from "./player-dialog";
 import { Crest } from "./crest";
 
 /** Build the MatchRow the dialog needs from a MatchDetail payload. */
@@ -52,11 +55,9 @@ export function MatchPageClient({
   const [detail, setDetail] = useState<MatchDetail | null>(initialDetail);
   const [failed, setFailed] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
-  // team / player drill-downs (match summary header, dialog lineups/events)
-  const [teamId, setTeamId] = useState<string | null>(null);
-  const [playerId, setPlayerId] = useState<string | null>(null);
-  // a stored match opened from the team/player dialogs (full MatchDialog)
-  const [dialogMatch, setDialogMatch] = useState<MatchRow | null>(null);
+  // a player opened from the lineups / event chips (dialog + URL push)
+  const [dialogPlayer, setDialogPlayer] = useState<PlayerDialogTarget | null>(null);
+  const pushedPlayerUrl = useRef(false);
 
   // keep <html lang/dir> + document.title in sync (SSR already rendered the
   // correct values for the URL's language - the URL itself carries it)
@@ -124,6 +125,74 @@ export function MatchPageClient({
   const row = useMemo(() => (detail ? rowFromDetail(detail) : null), [detail]);
   const rtl = lang === "ar";
   const strings = t(lang);
+
+  /** restore this match page's SEO meta (after a dialog on top closed) */
+  const restoreMatchMeta = useCallback(
+    (lang: Lang) => {
+      if (!detail) return;
+      document.title = matchTitle(detail, lang);
+      document
+        .querySelector('meta[name="description"]')
+        ?.setAttribute("content", matchDescription(detail, lang));
+    },
+    [detail],
+  );
+
+  /** a team clicked inside the match dialog gets its own team page (hard
+   *  navigation - internal link for crawlers, same as the team page does) */
+  const openTeam = useCallback(
+    (team: TeamRef) => {
+      if (!team?.id) return;
+      router.push(teamUrlFor(team.id, team, lang));
+    },
+    [router, lang],
+  );
+
+  /** open a player (lineups / event chips): dialog + slug URL + player meta */
+  const openPlayer = useCallback(
+    (p: PlayerDialogTarget) => {
+      if (!p?.id) return;
+      setDialogPlayer(p);
+      try {
+        window.history.pushState({ mcPlayer: p.id }, "", playerUrlFor(p.id, p, lang));
+        pushedPlayerUrl.current = true;
+      } catch {
+        /* history unavailable - the dialog still opens */
+      }
+      document.title = playerTitle(p, lang);
+      document
+        .querySelector('meta[name="description"]')
+        ?.setAttribute("content", playerDescription({ player: p }, lang));
+    },
+    [lang],
+  );
+
+  const closePlayer = useCallback(() => {
+    setDialogPlayer(null);
+    restoreMatchMeta(lang);
+    if (pushedPlayerUrl.current) {
+      pushedPlayerUrl.current = false;
+      try {
+        window.history.back();
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [lang, restoreMatchMeta]);
+
+  // browser BACK from a pushed /player/<id> URL: close the dialog
+  useEffect(() => {
+    const onPopState = () => {
+      const path = window.location.pathname;
+      if (!path.startsWith("/player/") && pushedPlayerUrl.current) {
+        pushedPlayerUrl.current = false;
+        setDialogPlayer(null);
+        restoreMatchMeta(lang);
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [lang, restoreMatchMeta]);
 
   return (
     <div
@@ -205,7 +274,6 @@ export function MatchPageClient({
             lang={lang}
             onOpenDetails={() => setDialogOpen(true)}
             onBack={() => router.push("/")}
-            onOpenTeam={setTeamId}
           />
         )}
       </main>
@@ -225,31 +293,21 @@ export function MatchPageClient({
           initialDetail={detail}
           openOverride={dialogOpen}
           onClose={() => setDialogOpen(false)}
-          onOpenTeam={setTeamId}
-          onOpenPlayer={setPlayerId}
+          onOpenTeam={openTeam}
+          onOpenPlayer={openPlayer}
         />
       )}
 
-      {/* ======= team + player drill-down dialogs ======= */}
-      <TeamDialog
-        teamId={teamId}
-        lang={lang}
-        onClose={() => setTeamId(null)}
-        onOpenMatch={(m) => {
-          setDialogOpen(false);
-          setDialogMatch(m);
-        }}
-      />
-      <PlayerDialog
-        playerId={playerId}
-        lang={lang}
-        onClose={() => setPlayerId(null)}
-        onOpenTeam={setTeamId}
-        onOpenMatch={(m) => {
-          setDialogOpen(false);
-          setDialogMatch(m);
-        }}
-      />
+      {/* ======= player dialog (opened from lineups / event chips) ======= */}
+      {dialogPlayer && (
+        <PlayerDialog
+          player={dialogPlayer}
+          lang={lang}
+          onClose={closePlayer}
+          onOpenTeam={openTeam}
+          elevated
+        />
+      )}
     </div>
   );
 }
@@ -264,13 +322,11 @@ function MatchSummaryCard({
   lang,
   onOpenDetails,
   onBack,
-  onOpenTeam,
 }: {
   detail: MatchDetail;
   lang: Lang;
   onOpenDetails: () => void;
   onBack: () => void;
-  onOpenTeam?: (teamId: string) => void;
 }) {
   const s = t(lang);
   const hasScore =
@@ -321,15 +377,10 @@ function MatchSummaryCard({
         </p>
 
         <h1 className="mt-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2 text-[15px] font-extrabold leading-snug">
-          <button
-            type="button"
-            onClick={() => detail.homeTeam.id && onOpenTeam?.(detail.homeTeam.id)}
-            disabled={!onOpenTeam}
-            className={`flex flex-col items-center gap-1 rounded-md p-1 transition-colors ${onOpenTeam ? "hover:bg-white/15" : ""}`}
-          >
+          <span className="flex flex-col items-center gap-1">
             <Crest url={detail.homeTeam.crestUrl} size={38} />
-            <span className="text-center underline-offset-2 hover:underline">{nameOf(detail.homeTeam, lang)}</span>
-          </button>
+            <span className="text-center">{nameOf(detail.homeTeam, lang)}</span>
+          </span>
           <span className="flex flex-col items-center gap-1">
             {hasScore ? (
               <span className="flex items-center gap-2 text-3xl tabular-nums tracking-wider">
@@ -347,15 +398,10 @@ function MatchSummaryCard({
               {statusLabel}
             </span>
           </span>
-          <button
-            type="button"
-            onClick={() => detail.awayTeam.id && onOpenTeam?.(detail.awayTeam.id)}
-            disabled={!onOpenTeam}
-            className={`flex flex-col items-center gap-1 rounded-md p-1 transition-colors ${onOpenTeam ? "hover:bg-white/15" : ""}`}
-          >
+          <span className="flex flex-col items-center gap-1">
             <Crest url={detail.awayTeam.crestUrl} size={38} />
-            <span className="text-center underline-offset-2 hover:underline">{nameOf(detail.awayTeam, lang)}</span>
-          </button>
+            <span className="text-center">{nameOf(detail.awayTeam, lang)}</span>
+          </span>
         </h1>
 
         {(when || venue || detail.referee) && (

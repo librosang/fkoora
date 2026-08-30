@@ -96,31 +96,42 @@ export interface Strings {
   drawForm: string;
   loseForm: string;
   seasonLabel: string;
-  // team dialog
-  teamResults: string;
-  teamFixtures: string;
+  // team dialog / team page
+  teamInfo: string;
+  matchesTab: string;
+  squadTab: string;
+  recentResults: string;
+  upcomingFixtures: string;
   noTeamMatches: string;
-  // player dialog
-  playerCareer: string;
-  playerRecent: string;
-  playerNoProfile: string;
-  positionLabel: string;
-  nationalityLabel: string;
-  bornLabel: string;
-  ageShort: string;
-  heightLabel: string;
-  weightLabel: string;
-  currentClubLabel: string;
-  birthplaceLabel: string;
+  noSquad: string;
+  yearsOld: string;
+  // player dialog / player page
+  playerInfo: string;
+  position: string;
+  posGoalkeeper: string;
+  posDefender: string;
+  posMidfielder: string;
+  posForward: string;
+  posOther: string;
+  age: string;
+  height: string;
+  weight: string;
+  nationality: string;
+  birthDate: string;
+  birthPlace: string;
+  shirtNumber: string;
+  currentClub: string;
+  career: string;
+  season: string;
   appsCol: string;
   goalsCol: string;
   assistsCol: string;
-  seasonCol: string;
+  yellowCol: string;
+  redCol: string;
+  minutesCol: string;
+  loan: string;
+  noCareer: string;
   clubCol: string;
-  compCol: string;
-  starterShort: string;
-  benchShort: string;
-  playerProfile: string;
 }
 
 const AR: Strings = {
@@ -216,31 +227,42 @@ const AR: Strings = {
   drawForm: "ت",
   loseForm: "خ",
   seasonLabel: "الموسم",
-  // team dialog
-  teamResults: "آخر النتائج",
-  teamFixtures: "المباريات القادمة",
-  noTeamMatches: "لا توجد مباريات مسجلة حالياً",
-  // player dialog
-  playerCareer: "المسيرة",
-  playerRecent: "آخر المباريات",
-  playerNoProfile: "لم يتم جلب ملف اللاعب بعد - ستتوفر التفاصيل بعد تحديث البيانات",
-  positionLabel: "المركز",
-  nationalityLabel: "الجنسية",
-  bornLabel: "الميلاد",
-  ageShort: "سنة",
-  heightLabel: "الطول",
-  weightLabel: "الوزن",
-  currentClubLabel: "النادي الحالي",
-  birthplaceLabel: "مكان الميلاد",
-  appsCol: "لعب",
+  // team dialog / team page
+  teamInfo: "صفحة الفريق",
+  matchesTab: "المباريات",
+  squadTab: "التشكيلة",
+  recentResults: "آخر النتائج",
+  upcomingFixtures: "المباريات القادمة",
+  noTeamMatches: "لا توجد مباريات لهذا الفريق",
+  noSquad: "لا تتوفر قائمة لاعبين لهذا الفريق بعد",
+  yearsOld: "سنة",
+  // player dialog / player page
+  playerInfo: "صفحة اللاعب",
+  position: "المركز",
+  posGoalkeeper: "حارس",
+  posDefender: "مدافع",
+  posMidfielder: "وسط",
+  posForward: "مهاجم",
+  posOther: "لاعب",
+  age: "العمر",
+  height: "الطول",
+  weight: "الوزن",
+  nationality: "الجنسية",
+  birthDate: "تاريخ الميلاد",
+  birthPlace: "مكان الميلاد",
+  shirtNumber: "الرقم",
+  currentClub: "النادي الحالي",
+  career: "المسيرة الاحترافية",
+  season: "الموسم",
+  appsCol: "مباريات",
   goalsCol: "أهداف",
   assistsCol: "صناعة",
-  seasonCol: "الموسم",
+  yellowCol: "صفراء",
+  redCol: "حمراء",
+  minutesCol: "دقائق",
+  loan: "إعارة",
+  noCareer: "لا يتوفر سجل مسيرة لهذا اللاعب بعد",
   clubCol: "النادي",
-  compCol: "البطولة",
-  starterShort: "أساسي",
-  benchShort: "بديل",
-  playerProfile: "ملف اللاعب",
 };
 
 const EN: Strings = {
@@ -336,31 +358,42 @@ const EN: Strings = {
   drawForm: "D",
   loseForm: "L",
   seasonLabel: "Season",
-  // team dialog
-  teamResults: "Latest results",
-  teamFixtures: "Upcoming fixtures",
-  noTeamMatches: "No matches stored yet",
-  // player dialog
-  playerCareer: "Career history",
-  playerRecent: "Recent matches",
-  playerNoProfile: "Player profile not fetched yet - details will appear once the data is refreshed",
-  positionLabel: "Position",
-  nationalityLabel: "Nationality",
-  bornLabel: "Born",
-  ageShort: "yrs",
-  heightLabel: "Height",
-  weightLabel: "Weight",
-  currentClubLabel: "Current club",
-  birthplaceLabel: "Place of birth",
+  // team dialog / team page
+  teamInfo: "Team page",
+  matchesTab: "Matches",
+  squadTab: "Squad",
+  recentResults: "Recent Results",
+  upcomingFixtures: "Upcoming Fixtures",
+  noTeamMatches: "No matches found for this team",
+  noSquad: "No squad list available for this team yet",
+  yearsOld: "years old",
+  // player dialog / player page
+  playerInfo: "Player page",
+  position: "Position",
+  posGoalkeeper: "Goalkeeper",
+  posDefender: "Defender",
+  posMidfielder: "Midfielder",
+  posForward: "Forward",
+  posOther: "Player",
+  age: "Age",
+  height: "Height",
+  weight: "Weight",
+  nationality: "Nationality",
+  birthDate: "Date of birth",
+  birthPlace: "Place of birth",
+  shirtNumber: "Shirt no.",
+  currentClub: "Current club",
+  career: "Career history",
+  season: "Season",
   appsCol: "Apps",
   goalsCol: "Goals",
   assistsCol: "Assists",
-  seasonCol: "Season",
+  yellowCol: "Yellow",
+  redCol: "Red",
+  minutesCol: "Minutes",
+  loan: "Loan",
+  noCareer: "No career history available for this player yet",
   clubCol: "Club",
-  compCol: "Competition",
-  starterShort: "XI",
-  benchShort: "Sub",
-  playerProfile: "Player profile",
 };
 
 export const STRINGS: Record<Lang, Strings> = { ar: AR, en: EN };
@@ -538,4 +571,58 @@ export function statLabel(statType: string, lang: Lang): string {
 
 export function statPercent(statType: string, value: number | string): boolean {
   return statType === "POSSESSION" || String(value).includes("%");
+}
+
+// ---------------------------------------------------------------------------
+// player/team display helpers
+// ---------------------------------------------------------------------------
+
+/** Localized position label ("حارس" / "Goalkeeper") for the provider enum. */
+export function positionLabel(
+  position: string | null | undefined,
+  lang: Lang,
+): string | null {
+  if (!position) return null;
+  const s = t(lang);
+  switch (position.toUpperCase()) {
+    case "GOALKEEPER":
+      return s.posGoalkeeper;
+    case "DEFENDER":
+      return s.posDefender;
+    case "MIDFIELDER":
+      return s.posMidfielder;
+    case "FORWARD":
+      return s.posForward;
+    default:
+      return s.posOther;
+  }
+}
+
+/** "1.82 م" / "1.82 m" (null when unknown). */
+export function heightLabel(cm: number | null | undefined, lang: Lang): string | null {
+  if (!cm || cm <= 0) return null;
+  const m = (cm / 100).toFixed(2);
+  return lang === "ar" ? `${m} م` : `${m} m`;
+}
+
+/** "76 كغ" / "76 kg" (null when unknown). */
+export function weightLabel(kg: number | null | undefined, lang: Lang): string | null {
+  if (!kg || kg <= 0) return null;
+  return lang === "ar" ? `${kg} كغ` : `${kg} kg`;
+}
+
+/** "30 أغسطس 1998" / "30 August 1998" (null when unknown). */
+export function birthDateLabel(
+  iso: string | null | undefined,
+  lang: Lang,
+): string | null {
+  if (!iso) return null;
+  const d = new Date(`${iso}T12:00:00Z`);
+  if (isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat(localeOf(lang), {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(d);
 }

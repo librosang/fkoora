@@ -1,12 +1,15 @@
 import {
   collectMatchUrls,
   collectCompetitionUrls,
+  collectTeamUrls,
   competitionChunkCount,
   dayEntriesForMonth,
   mainEntries,
   matchChunkCount,
   MATCHES_PER_SITEMAP,
   COMPETITIONS_PER_SITEMAP,
+  TEAMS_PER_SITEMAP,
+  teamChunkCount,
   urlSetXml,
   windowMonths,
   XML_HEADERS,
@@ -28,6 +31,8 @@ import { siteUrl, utcToday } from "@/lib/seo";
  *   /sitemaps/competitions-N.xml - competition pages (canonical
  *                                  /competition/<id>/<slug> URLs in BOTH
  *                                  languages), 500 per file.
+ *   /sitemaps/teams-N.xml        - team pages (canonical /team/<id>/<slug>
+ *                                  URLs in BOTH languages), 500 per file.
  *
  * Everything is computed per request (fail-safe on backend errors).
  */
@@ -104,6 +109,30 @@ export async function GET(_req: Request, ctx: RouteContext): Promise<Response> {
       lastmod: now,
       changefreq: "daily" as const,
       priority: 0.6,
+    }));
+    return new Response(urlSetXml(entries), { headers: XML_HEADERS });
+  }
+
+  // teams-N.xml - team pages in 500-URL chunks (AR + EN per team)
+  const teamsMatch = /^teams-(\d+)\.xml$/.exec(name);
+  if (teamsMatch) {
+    const page = Number.parseInt(teamsMatch[1], 10);
+    if (!Number.isInteger(page) || page < 1 || page > 1000) {
+      return new Response("Not Found", { status: 404 });
+    }
+    const urls = await collectTeamUrls(base);
+    if (page > teamChunkCount(urls.length)) {
+      return new Response("Not Found", { status: 404 });
+    }
+    const slice = urls.slice(
+      (page - 1) * TEAMS_PER_SITEMAP,
+      page * TEAMS_PER_SITEMAP,
+    );
+    const entries = slice.map((loc) => ({
+      loc,
+      lastmod: now,
+      changefreq: "daily" as const,
+      priority: 0.5,
     }));
     return new Response(urlSetXml(entries), { headers: XML_HEADERS });
   }

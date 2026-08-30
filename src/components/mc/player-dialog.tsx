@@ -7,105 +7,115 @@ import {
   DialogContent,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Loader2, RefreshCw, X } from "lucide-react";
-import type { Lang, MatchRow, PlayerDetail } from "@/lib/goal/types";
-import { formatDateTime, nameOf, statusDisplay, t } from "@/lib/i18n";
+import { Loader2, RefreshCw, ShieldQuestion, X } from "lucide-react";
+import type { Lang, PlayerDetail, TeamRef } from "@/lib/goal/types";
+import {
+  birthDateLabel,
+  heightLabel,
+  nameOf,
+  positionLabel,
+  t,
+  weightLabel,
+} from "@/lib/i18n";
 import { Crest } from "./crest";
 
+/** What the dialog needs to identify the player being opened. */
+export interface PlayerDialogTarget {
+  id: string;
+  nameEn?: string | null;
+  nameAr?: string | null;
+}
+
+interface PlayerDialogProps {
+  player: PlayerDialogTarget | null;
+  lang: Lang;
+  onClose: () => void;
+  /** open the team dialog for the player's current club */
+  onOpenTeam: (t: TeamRef) => void;
+  /** SSR-provided detail for `player` (player page): seeds the state and
+   *  skips the first client fetch entirely */
+  initialDetail?: PlayerDetail | null;
+  /** when defined, the dialog's open state is fully controlled by the parent
+   *  (player page summary card); undefined = self-managed (listing behavior) */
+  openOverride?: boolean;
+  /** true when this dialog must stack ABOVE another dialog already open */
+  elevated?: boolean;
+}
+
 /**
- * Player drill-down dialog: photo + bilingual names, bio card, career history
- * table and last appearances. Read-only: served from the players /
- * player_career_entries / lineups tables filled by the scraper walks.
+ * Player dialog: photo + bio card (position, club, age, height, ...) and the
+ * full career timeline per season. Opened from lineups, squads and event chips.
  */
 export function PlayerDialog({
-  playerId,
+  player,
   lang,
   onClose,
   onOpenTeam,
-  onOpenMatch,
-}: {
-  playerId: string | null;
-  lang: Lang;
-  onClose: () => void;
-  /** optional: click the current club / a career club -> team dialog */
-  onOpenTeam?: (teamId: string) => void;
-  /** optional: click a recent match -> match dialog (a stub row is built
-   *  from the appearance; the match dialog fetches the full detail itself) */
-  onOpenMatch?: (m: MatchRow) => void;
-}) {
+  initialDetail,
+  openOverride,
+  elevated,
+}: PlayerDialogProps) {
   const s = t(lang);
+  const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<PlayerDetail | null>(null);
   const [error, setError] = useState(false);
+  const [errorFor, setErrorFor] = useState<string | null>(null);
+
+  const playerId = player?.id ?? null;
+
+  // Only use the detail when it belongs to the player currently open - the
+  // state briefly still holds the PREVIOUS player's detail after switching.
+  const currentDetail =
+    detail && detail.player.id === playerId ? detail : null;
+  const currentError = error && errorFor === playerId;
 
   const load = useCallback(async () => {
     if (!playerId) return;
     setError(false);
-    setDetail(null);
     try {
-      const res = await fetch(`/api/player/${playerId}`);
+      const res = await fetch(`/api/player/${encodeURIComponent(playerId)}`);
       if (!res.ok) throw new Error("failed");
       setDetail(await res.json());
     } catch {
       setError(true);
+      setErrorFor(playerId);
     }
   }, [playerId]);
 
+  // data effect: seed from SSR detail when it belongs to this player, else fetch
   useEffect(() => {
-    if (!playerId) return;
+    if (!player) return;
+    if (initialDetail && initialDetail.player.id === player.id) {
+      setDetail(initialDetail);
+      return;
+    }
     setDetail(null);
-    setError(false);
     load();
-  }, [playerId, load]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player, load, initialDetail]);
 
-  const p = detail?.player;
-  const rtl = lang === "ar";
+  // open-state effect: skipped when the parent controls the dialog
+  useEffect(() => {
+    if (openOverride !== undefined) return;
+    setOpen(!!player);
+  }, [openOverride, player]);
 
-  const openAppearance = (a: PlayerDetail["appearances"][number]) => {
-    if (!onOpenMatch) return;
-    onOpenMatch({
-      matchId: a.matchId,
-      kickoffUtc: a.kickoffUtc,
-      status: a.status,
-      homeTeam: a.homeTeam,
-      awayTeam: a.awayTeam,
-      competition: {
-        id: "",
-        nameEn: a.competitionNameEn,
-        nameAr: a.competitionNameAr,
-      },
-      homeScore: a.homeScore,
-      awayScore: a.awayScore,
-      homeRedCards: 0,
-      awayRedCards: 0,
-    });
-  };
-  const positionLabel = (pos: string | null) => {
-    if (!pos) return null;
-    const map: Record<string, [string, string]> = {
-      GOALKEEPER: ["Goalkeeper", "حارس مرمى"],
-      DEFENDER: ["Defender", "مدافع"],
-      MIDFIELDER: ["Midfielder", "وسط"],
-      FORWARD: ["Forward", "مهاجم"],
-    };
-    const hit = map[pos.toUpperCase()];
-    return hit ? (rtl ? hit[1] : hit[0]) : pos;
-  };
+  const isOpen = openOverride !== undefined ? openOverride : open;
 
-  const born = p?.birthDate
-    ? `${p.birthDate}${p.age ? ` (${p.age} ${s.ageShort})` : ""}`
-    : p?.age
-      ? `${p.age} ${s.ageShort}`
-      : null;
+  // the SSR page client passes the seed through a ref-less prop chain; the
+  // header can render from the passed `player` even before the detail lands
+  const bio = currentDetail?.player || null;
 
   return (
-    <Dialog open={!!playerId} onOpenChange={(v) => !v && onClose()}>
+    <Dialog open={isOpen} onOpenChange={(v) => !v && onClose()}>
       <DialogContent
         aria-describedby={undefined}
-        dir={rtl ? "rtl" : "ltr"}
+        dir={lang === "ar" ? "rtl" : "ltr"}
         showCloseButton={false}
-        className="max-h-[92dvh] grid-cols-[minmax(0,1fr)] gap-0 overflow-y-auto rounded-lg border border-[#b9c8dd] p-0 sm:max-w-xl"
+        overlayClassName={elevated ? "z-[55]" : undefined}
+        className={`max-h-[92dvh] grid-cols-[minmax(0,1fr)] gap-0 overflow-y-auto rounded-lg border border-[#b9c8dd] p-0 sm:max-w-2xl${elevated ? " z-[60]" : ""}`}
       >
-        {playerId && (
+        {player && (
           <>
             {/* header */}
             <div className="bg-gradient-to-b from-[#1d4f92] to-[#123a70] px-4 pb-3 pt-4 text-white">
@@ -116,49 +126,54 @@ export function PlayerDialog({
               >
                 <X className="h-4 w-4" />
               </DialogClose>
-              <DialogTitle className="flex items-center gap-3 text-[15px] font-bold">
-                <Crest url={p?.imageUrl} size={44} className="rounded-full bg-white/10" />
-                <span className="min-w-0">
-                  <span className="block truncate">
-                    {p ? nameOf(p, lang) || s.playerProfile : "..."}
+
+              <DialogTitle className="flex items-center gap-3 pe-10 leading-snug">
+                <Crest url={bio?.imageUrl} size={44} className="rounded-full bg-white/10" />
+                <span className="flex min-w-0 flex-col gap-1">
+                  <span className="truncate text-[15px] font-bold">
+                    {nameOf(bio || player, lang)}
                   </span>
-                  <span className="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-white/75">
-                    {p?.position && (
-                      <span className="rounded bg-white/15 px-1.5 py-0.5">
-                        {positionLabel(p.position)}
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    {positionLabel(bio?.position, lang) && (
+                      <span className="rounded bg-white/15 px-1.5 py-0.5 text-[11px] font-semibold">
+                        {positionLabel(bio?.position, lang)}
                       </span>
                     )}
-                    {p?.shirtNumber != null && (
-                      <span className="rounded bg-white/15 px-1.5 py-0.5 tabular-nums">
-                        #{p.shirtNumber}
+                    {bio?.shirtNumber != null && (
+                      <span className="rounded bg-white/15 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums">
+                        #{bio.shirtNumber}
                       </span>
-                    )}
-                    {detail?.currentClub && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          detail.currentClub?.id && onOpenTeam?.(detail.currentClub.id)
-                        }
-                        className="rounded bg-white/15 px-1.5 py-0.5 transition-colors hover:bg-white/30"
-                      >
-                        {nameOf(detail.currentClub, lang)}
-                      </button>
                     )}
                   </span>
                 </span>
               </DialogTitle>
+
+              {/* current club chip - clickable, opens the team dialog */}
+              {currentDetail?.currentClub && (
+                <button
+                  type="button"
+                  onClick={() => currentDetail.currentClub && onOpenTeam(currentDetail.currentClub)}
+                  className="mt-2.5 flex max-w-full items-center gap-1.5 rounded-full bg-white/15 px-2 py-1 text-[11.5px] font-semibold transition-colors hover:bg-white/25 focus:outline-none"
+                >
+                  <Crest url={currentDetail.currentClub.crestUrl} size={15} />
+                  <span className="truncate">
+                    {nameOf(currentDetail.currentClub, lang)}
+                  </span>
+                </button>
+              )}
             </div>
 
-            {/* body */}
-            <div className="p-3 sm:p-4" aria-busy={!detail && !error}>
-              {!detail && !error && (
+            {/* body: loading/error show IN PLACE - never the previous player's
+                content (currentDetail is keyed to the player id) */}
+            <div className="p-3 sm:p-4" aria-busy={!currentDetail && !currentError}>
+              {!currentDetail && !currentError && (
                 <div className="flex items-center justify-center gap-2 py-10 text-[#5b6b80]">
                   <Loader2 className="h-5 w-5 animate-spin" />
                   <span className="text-sm">{s.loading}</span>
                 </div>
               )}
 
-              {error && !detail && (
+              {currentError && !currentDetail && (
                 <div className="flex flex-col items-center gap-3 py-8">
                   <p className="text-sm text-[#b3392f]">{s.loadError}</p>
                   <button
@@ -171,155 +186,10 @@ export function PlayerDialog({
                 </div>
               )}
 
-              {detail && p && (
+              {currentDetail && (
                 <div className="space-y-4">
-                  {!p.profileFetched && (
-                    <p className="rounded border border-[#e8d9b8] bg-[#fdf8ec] px-3 py-2 text-[12px] text-[#7a5d1e]">
-                      {s.playerNoProfile}
-                    </p>
-                  )}
-
-                  {/* bio card */}
-                  <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 rounded-md border border-[#dbe4ef] bg-[#f6f9fd] p-3 text-[12.5px] sm:grid-cols-3">
-                    <BioCell label={s.nationalityLabel}>
-                      {rtl ? p.nationalityAr || p.nationalityEn : p.nationalityEn || p.nationalityAr}
-                    </BioCell>
-                    <BioCell label={s.bornLabel}>{born}</BioCell>
-                    <BioCell label={s.heightLabel}>
-                      {p.heightCm ? `${p.heightCm} cm` : null}
-                    </BioCell>
-                    <BioCell label={s.weightLabel}>
-                      {p.weightKg ? `${p.weightKg} kg` : null}
-                    </BioCell>
-                    <BioCell label={s.birthplaceLabel}>
-                      {rtl
-                        ? p.placeOfBirthAr || p.placeOfBirthEn
-                        : p.placeOfBirthEn || p.placeOfBirthAr}
-                    </BioCell>
-                    {p.fullNameEn && (
-                      <BioCell label={rtl ? "الاسم الكامل" : "Full name"}>
-                        {rtl ? p.fullNameAr || p.fullNameEn : p.fullNameEn || p.fullNameAr}
-                      </BioCell>
-                    )}
-                  </div>
-
-                  {/* career history */}
-                  {detail.career.length > 0 && (
-                    <div className="overflow-hidden rounded-md border border-[#dbe4ef]">
-                      <div className="border-b border-[#dbe4ef] bg-[#eef3fa] px-3 py-1.5 text-[12px] font-bold text-[#17457f]">
-                        {s.playerCareer}
-                      </div>
-                      <table className="w-full border-collapse text-[12px]">
-                        <thead>
-                          <tr className="border-b border-[#e2e9f2] text-[10.5px] font-semibold text-[#5b6b80]">
-                            <th className="px-1.5 py-1 text-start">{s.seasonCol}</th>
-                            <th className="px-1.5 py-1 text-start">{s.clubCol}</th>
-                            <th className="px-1.5 py-1 text-center">{s.appsCol}</th>
-                            <th className="px-1.5 py-1 text-center">{s.goalsCol}</th>
-                            <th className="px-1.5 py-1 text-center">{s.assistsCol}</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {detail.career.map((c, i) => (
-                            <tr key={i} className="border-b border-[#eef2f8] last:border-b-0">
-                              <td className="px-1.5 py-1 tabular-nums text-[#33455e]">
-                                {c.seasonName || "-"}
-                                {c.isLoan && (
-                                  <span className="ms-1 rounded bg-[#e8eff9] px-1 text-[9.5px] font-bold text-[#17457f]">
-                                    {lang === "ar" ? "إعارة" : "loan"}
-                                  </span>
-                                )}
-                              </td>
-                              <td className="px-1.5 py-1 text-[#1c2b3a]">
-                                {c.teamId && onOpenTeam ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => c.teamId && onOpenTeam(c.teamId)}
-                                    className="font-semibold text-[#17457f] underline-offset-2 hover:underline"
-                                  >
-                                    {rtl ? c.teamNameAr || c.teamNameEn : c.teamNameEn || c.teamNameAr}
-                                  </button>
-                                ) : (
-                                  (rtl ? c.teamNameAr || c.teamNameEn : c.teamNameEn || c.teamNameAr) || "-"
-                                )}
-                              </td>
-                              <td className="px-1.5 py-1 text-center tabular-nums">{c.appearances ?? "-"}</td>
-                              <td className="px-1.5 py-1 text-center font-bold tabular-nums text-[#17457f]">
-                                {c.goals ?? "-"}
-                              </td>
-                              <td className="px-1.5 py-1 text-center tabular-nums">{c.assists ?? "-"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-
-                  {/* recent appearances */}
-                  {detail.appearances.length > 0 && (
-                    <div className="overflow-hidden rounded-md border border-[#dbe4ef]">
-                      <div className="border-b border-[#dbe4ef] bg-[#eef3fa] px-3 py-1.5 text-[12px] font-bold text-[#17457f]">
-                        {s.playerRecent}
-                      </div>
-                      <div role="list">
-                        {detail.appearances.map((a) => {
-                          const st = statusDisplay(
-                            { status: a.status, kickoffUtc: a.kickoffUtc },
-                            lang,
-                          );
-                          const hasScore = a.homeScore !== null && a.awayScore !== null;
-                          return (
-                            <button
-                              key={a.matchId}
-                              type="button"
-                              role="listitem"
-                              onClick={() => openAppearance(a)}
-                              disabled={!onOpenMatch}
-                              className={`flex w-full items-center gap-2 border-b border-[#eef2f8] px-2.5 py-1.5 text-start text-[12.5px] transition-colors last:border-b-0 ${
-                                onOpenMatch ? "hover:bg-[#e8f1fb]" : ""
-                              }`}
-                            >
-                              <span
-                                className={`w-[46px] shrink-0 text-[11px] font-bold tabular-nums ${
-                                  st.kind === "live" ? "text-[#d31f26]" : "text-[#5b6b80]"
-                                }`}
-                              >
-                                {st.main}
-                              </span>
-                              <span className="min-w-0 flex-1 truncate text-[#1c2b3a]">
-                                {nameOf(a.homeTeam, lang)}{" "}
-                                <span className="text-[#93a1b3]">{s.vs}</span>{" "}
-                                {nameOf(a.awayTeam, lang)}
-                              </span>
-                              <span className="shrink-0 truncate text-[10.5px] text-[#7d8ea3]">
-                                {rtl
-                                  ? a.competitionNameAr || a.competitionNameEn
-                                  : a.competitionNameEn || a.competitionNameAr}
-                              </span>
-                              {a.rating !== null && (
-                                <span className="shrink-0 rounded bg-[#eef3fa] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-[#33455e]">
-                                  {a.rating}
-                                </span>
-                              )}
-                              {hasScore ? (
-                                <span className="shrink-0 text-[13px] font-extrabold tabular-nums text-[#17457f]">
-                                  {a.homeScore} - {a.awayScore}
-                                </span>
-                              ) : (
-                                <span className="shrink-0 text-[11px] font-semibold text-[#a5b1c0]">
-                                  {formatDateTime(a.kickoffUtc, lang).split(",")[0]}
-                                </span>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {p.profileFetched && detail.career.length === 0 && detail.appearances.length === 0 && (
-                    <p className="py-4 text-center text-sm text-[#7d8ea3]">{s.noStats}</p>
-                  )}
+                  <BioGrid detail={currentDetail} lang={lang} />
+                  <CareerTable detail={currentDetail} lang={lang} />
                 </div>
               )}
             </div>
@@ -330,19 +200,130 @@ export function PlayerDialog({
   );
 }
 
-function BioCell({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
+// ---------------------------------------------------------------------------
+// bio grid
+// ---------------------------------------------------------------------------
+function BioGrid({ detail, lang }: { detail: PlayerDetail; lang: Lang }) {
+  const s = t(lang);
+  const p = detail.player;
+
+  const nationality =
+    lang === "ar" ? p.nationalityAr || p.nationalityEn : p.nationalityEn || p.nationalityAr;
+  const birthPlace =
+    lang === "ar" ? p.placeOfBirthAr || p.placeOfBirthEn : p.placeOfBirthEn || p.placeOfBirthAr;
+  const birthDate = birthDateLabel(p.birthDate, lang);
+
+  const cells: { label: string; value: string | null }[] = [
+    { label: s.currentClub, value: detail.currentClub ? nameOf(detail.currentClub, lang) : null },
+    { label: s.position, value: positionLabel(p.position, lang) },
+    {
+      label: s.age,
+      value: p.age != null ? `${p.age} ${s.yearsOld}` : null,
+    },
+    { label: s.birthDate, value: birthDate },
+    { label: s.nationality, value: nationality },
+    { label: s.birthPlace, value: birthPlace },
+    { label: s.height, value: heightLabel(p.heightCm, lang) },
+    { label: s.weight, value: weightLabel(p.weightKg, lang) },
+  ];
+  const filled = cells.filter((c) => c.value);
+  if (filled.length === 0) return null;
+
   return (
-    <div className="min-w-0">
-      <div className="text-[10.5px] font-semibold uppercase tracking-wide text-[#7d8ea3]">
-        {label}
+    <div className="overflow-hidden rounded-md border border-[#dbe4ef] bg-white">
+      <div className="grid grid-cols-2 gap-px bg-[#e2e9f2] sm:grid-cols-3">
+        {filled.map((c) => (
+          <div key={c.label} className="bg-white px-3 py-2">
+            <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[#7d8ea3]">
+              {c.label}
+            </p>
+            <p className="mt-0.5 truncate text-[12.5px] font-semibold text-[#1c2b3a]" title={c.value ?? undefined}>
+              {c.value}
+            </p>
+          </div>
+        ))}
       </div>
-      <div className="truncate font-semibold text-[#1c2b3a]">{children || "-"}</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// career table
+// ---------------------------------------------------------------------------
+function CareerTable({ detail, lang }: { detail: PlayerDetail; lang: Lang }) {
+  const s = t(lang);
+
+  if (detail.career.length === 0) {
+    return (
+      <div className="rounded-md border border-[#dbe4ef] bg-[#f6f9fd] p-4 text-center">
+        <ShieldQuestion className="mx-auto mb-1.5 h-5 w-5 text-[#93a1b3]" />
+        <p className="text-sm text-[#7d8ea3]">{s.noCareer}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-hidden rounded-md border border-[#dbe4ef] bg-white">
+      <div className="border-b border-[#dbe4ef] bg-[#eef3fa] px-3 py-1.5 text-[12px] font-bold text-[#17457f]">
+        {s.career}
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[420px] border-collapse text-[12px]">
+          <thead>
+            <tr className="bg-[#f6f9fd] text-[10.5px] font-bold text-[#4a5a70]">
+              <th className="px-2 py-1.5 text-start">{s.season}</th>
+              <th className="px-2 py-1.5 text-start">{s.clubCol}</th>
+              <th className="w-10 px-1 py-1.5 text-center">{s.appsCol}</th>
+              <th className="w-10 px-1 py-1.5 text-center">{s.goalsCol}</th>
+              <th className="hidden w-10 px-1 py-1.5 text-center sm:table-cell">{s.assistsCol}</th>
+              <th className="hidden w-16 px-1 py-1.5 text-center md:table-cell">{s.minutesCol}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {detail.career.map((e, i) => {
+              const compName =
+                lang === "ar"
+                  ? e.competition.nameAr || e.competition.nameEn
+                  : e.competition.nameEn || e.competition.nameAr;
+              return (
+                <tr
+                  key={i}
+                  className={`border-t border-[#e2e9f2] ${i % 2 === 1 ? "bg-[#f6f9fd]" : "bg-white"}`}
+                >
+                  <td className="whitespace-nowrap px-2 py-1.5 font-semibold tabular-nums text-[#33455e]">
+                    {e.seasonName || "—"}
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <span className="flex min-w-0 items-center gap-1.5" title={compName || undefined}>
+                      <Crest url={e.team.crestUrl} size={16} />
+                      <span className="truncate font-semibold text-[#1c2b3a]">
+                        {nameOf(e.team, lang)}
+                      </span>
+                      {e.isLoan && (
+                        <span className="shrink-0 rounded bg-[#fdf3e0] px-1 text-[9.5px] font-bold text-[#9a6b13]">
+                          {s.loan}
+                        </span>
+                      )}
+                    </span>
+                  </td>
+                  <td className="px-1 py-1.5 text-center tabular-nums text-[#33455e]">
+                    {e.appearances ?? "—"}
+                  </td>
+                  <td className="px-1 py-1.5 text-center font-bold tabular-nums text-[#14263a]">
+                    {e.goals ?? "—"}
+                  </td>
+                  <td className="hidden px-1 py-1.5 text-center tabular-nums text-[#33455e] sm:table-cell">
+                    {e.assists ?? "—"}
+                  </td>
+                  <td className="hidden px-1 py-1.5 text-center tabular-nums text-[#5b6b80] md:table-cell">
+                    {e.minutesPlayed ?? "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

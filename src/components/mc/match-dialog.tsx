@@ -9,7 +9,15 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Loader2, RefreshCw, X } from "lucide-react";
-import type { Lang, LineupTeam, MatchDetail, MatchEvent, MatchRow } from "@/lib/goal/types";
+import type {
+  Lang,
+  LineupTeam,
+  MatchDetail,
+  MatchEvent,
+  MatchRow,
+  TeamRef,
+} from "@/lib/goal/types";
+import type { PlayerDialogTarget } from "./player-dialog";
 import {
   compLabel,
   formatDateTime,
@@ -31,9 +39,10 @@ interface MatchDialogProps {
   /** when defined, the dialog's open state is fully controlled by the parent
    *  (match page summary card); undefined = self-managed (listing behavior) */
   openOverride?: boolean;
-  /** optional drill-downs: click a team name/crest or a player name */
-  onOpenTeam?: (teamId: string) => void;
-  onOpenPlayer?: (playerId: string) => void;
+  /** open the team dialog for one of the two teams (header crest/name) */
+  onOpenTeam?: (team: TeamRef) => void;
+  /** open the player dialog for a lineup player */
+  onOpenPlayer?: (player: PlayerDialogTarget) => void;
 }
 
 export function MatchDialog({
@@ -149,11 +158,16 @@ export function MatchDialog({
                 })()}
               </DialogTitle>
 
-              {/* score row */}
+              {/* score row - team crest/name open the team dialog when the
+                  parent provides the handler (nested buttons inside the dialog
+                  header are fine: the header is a plain div, not an anchor) */}
               <div className="mt-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-                <div className="flex flex-col items-center gap-1">
-                  <TeamButton team={home} lang={lang} onOpenTeam={onOpenTeam} />
-                </div>
+                <TeamHeaderBlock
+                  team={home || undefined}
+                  lang={lang}
+                  strings={s}
+                  onOpenTeam={onOpenTeam}
+                />
 
                 <div className="flex flex-col items-center gap-1">
                   {showScore ? (
@@ -197,9 +211,12 @@ export function MatchDialog({
                   )}
                 </div>
 
-                <div className="flex flex-col items-center gap-1">
-                  <TeamButton team={away} lang={lang} onOpenTeam={onOpenTeam} />
-                </div>
+                <TeamHeaderBlock
+                  team={away || undefined}
+                  lang={lang}
+                  strings={s}
+                  onOpenTeam={onOpenTeam}
+                />
               </div>
 
               {/* meta line */}
@@ -287,7 +304,7 @@ export function MatchDialog({
                         {visibleEvents.map((ev, i) => (
                           <div key={i} className="grid grid-cols-[1fr_52px_1fr] items-center">
                             {ev.teamSide === "home" ? (
-                              <EventChip ev={ev} lang={lang} align="end" onOpenPlayer={onOpenPlayer} />
+                              <EventChip ev={ev} lang={lang} align="end" />
                             ) : (
                               <span />
                             )}
@@ -295,7 +312,7 @@ export function MatchDialog({
                               {minuteLabel(ev)}
                             </div>
                             {ev.teamSide === "away" ? (
-                              <EventChip ev={ev} lang={lang} align="start" onOpenPlayer={onOpenPlayer} />
+                              <EventChip ev={ev} lang={lang} align="start" />
                             ) : (
                               <span />
                             )}
@@ -308,8 +325,16 @@ export function MatchDialog({
                   {/* ---------- lineups ---------- */}
                   <TabsContent value="lineups" className="mt-3">
                     <div className="grid gap-4 md:grid-cols-2">
-                      <LineupColumn team={currentDetail.lineups.home} lang={lang} onOpenPlayer={onOpenPlayer} />
-                      <LineupColumn team={currentDetail.lineups.away} lang={lang} onOpenPlayer={onOpenPlayer} />
+                      <LineupColumn
+                        team={currentDetail.lineups.home}
+                        lang={lang}
+                        onOpenPlayer={onOpenPlayer}
+                      />
+                      <LineupColumn
+                        team={currentDetail.lineups.away}
+                        lang={lang}
+                        onOpenPlayer={onOpenPlayer}
+                      />
                     </div>
                   </TabsContent>
 
@@ -370,39 +395,40 @@ export function MatchDialog({
 }
 
 // ---------------------------------------------------------------------------
-// clickable team (crest + name) used in the dialog header
+// team header block (crest + name) - a button that opens the team dialog
 // ---------------------------------------------------------------------------
-function TeamButton({
+function TeamHeaderBlock({
   team,
   lang,
+  strings: s,
   onOpenTeam,
 }: {
-  team?: MatchDetail["homeTeam"];
+  team?: TeamRef;
   lang: Lang;
-  onOpenTeam?: (teamId: string) => void;
+  strings: ReturnType<typeof t>;
+  onOpenTeam?: (team: TeamRef) => void;
 }) {
-  const enabled = !!(onOpenTeam && team?.id);
-  if (!enabled) {
-    return (
-      <>
-        <Crest url={team?.crestUrl} size={34} />
-        <span className="text-center text-[13px] font-bold leading-tight">
-          {nameOf(team || {}, lang)}
-        </span>
-      </>
-    );
+  const clickable = !!onOpenTeam && !!team?.id;
+  const inner = (
+    <>
+      <Crest url={team?.crestUrl} size={34} />
+      <span className="text-center text-[13px] font-bold leading-tight">
+        {nameOf(team || {}, lang)}
+      </span>
+    </>
+  );
+  if (!clickable) {
+    return <div className="flex flex-col items-center gap-1">{inner}</div>;
   }
   return (
     <button
       type="button"
-      onClick={() => onOpenTeam?.(team!.id)}
-      title={nameOf(team || {}, lang)}
-      className="flex flex-col items-center gap-1 rounded-md p-1 transition-colors hover:bg-white/15 focus:outline-none"
+      onClick={() => team && onOpenTeam?.(team)}
+      title={s.teamInfo}
+      aria-label={`${s.teamInfo}: ${nameOf(team || {}, lang)}`}
+      className="group flex flex-col items-center gap-1 rounded-md p-1 transition-colors hover:bg-white/10 focus:outline-none"
     >
-      <Crest url={team?.crestUrl} size={34} />
-      <span className="text-center text-[13px] font-bold leading-tight underline-offset-2 hover:underline">
-        {nameOf(team || {}, lang)}
-      </span>
+      {inner}
     </button>
   );
 }
@@ -414,12 +440,10 @@ function EventChip({
   ev,
   lang,
   align,
-  onOpenPlayer,
 }: {
   ev: MatchEvent;
   lang: Lang;
   align: "start" | "end";
-  onOpenPlayer?: (playerId: string) => void;
 }) {
   const s = t(lang);
   const player = nameOf(ev.player || {}, lang);
@@ -483,7 +507,6 @@ function EventChip({
       varCancelled={varCancelled}
       missed={missed}
       scored={scored}
-      onOpenPlayer={onOpenPlayer}
     />
   );
 
@@ -519,7 +542,6 @@ function EventLabel({
   varCancelled,
   missed,
   scored,
-  onOpenPlayer,
 }: {
   ev: MatchEvent;
   player: string;
@@ -531,7 +553,6 @@ function EventLabel({
   varCancelled: boolean;
   missed: boolean;
   scored: boolean;
-  onOpenPlayer?: (playerId: string) => void;
 }) {
   const rtl = lang === "ar";
   // direction-safe: keep chips LTR-ordered internally but text uses page lang
@@ -543,29 +564,16 @@ function EventLabel({
       {/* main person(s): substitutions show the incoming + outgoing pair */}
       {ev.eventType === "SUBSTITUTION" && related ? (
         <span className="inline-flex items-center gap-x-1.5">
-          <PlayerName
-            name={related}
-            id={ev.relatedPlayer?.id || null}
-            className="font-semibold text-[#1d7a1d]"
-            prefix={"\u2191 "}
-            onOpenPlayer={onOpenPlayer}
-          />
+          <span className="font-semibold text-[#1d7a1d]">↑ {related}</span>
           <span className="text-[#93a1b3]">·</span>
-          <PlayerName
-            name={player}
-            id={ev.player?.id || null}
-            className="font-semibold text-[#b3392f]"
-            prefix={"\u2193 "}
-            onOpenPlayer={onOpenPlayer}
-          />
+          <span className="font-semibold text-[#b3392f]">↓ {player}</span>
         </span>
       ) : (
-        <PlayerName
-          name={player}
-          id={ev.player?.id || null}
+        <span
           className={`font-semibold ${varLabel && varCancelled ? "text-[#8a2f28]" : "text-[#1c2b3a]"}`}
-          onOpenPlayer={onOpenPlayer}
-        />
+        >
+          {player}
+        </span>
       )}
 
       {/* VAR review outcome (e.g. disallowed goal) */}
@@ -602,46 +610,6 @@ function EventLabel({
 }
 
 // ---------------------------------------------------------------------------
-// clickable player name (events + lineups)
-// ---------------------------------------------------------------------------
-function PlayerName({
-  name,
-  id,
-  className,
-  prefix,
-  onOpenPlayer,
-}: {
-  name: string;
-  id?: string | null;
-  className?: string;
-  prefix?: string;
-  onOpenPlayer?: (playerId: string) => void;
-}) {
-  if (onOpenPlayer && id) {
-    return (
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onOpenPlayer(id);
-        }}
-        title={name}
-        className={`rounded text-start underline-offset-2 hover:underline focus:outline-none ${className || ""}`}
-      >
-        {prefix}
-        {name}
-      </button>
-    );
-  }
-  return (
-    <span className={className}>
-      {prefix}
-      {name}
-    </span>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // lineup column
 // ---------------------------------------------------------------------------
 function LineupColumn({
@@ -651,7 +619,7 @@ function LineupColumn({
 }: {
   team?: LineupTeam;
   lang: Lang;
-  onOpenPlayer?: (playerId: string) => void;
+  onOpenPlayer?: (player: PlayerDialogTarget) => void;
 }) {
   const s = t(lang);
   if (!team || team.entries.length === 0) {
@@ -665,36 +633,64 @@ function LineupColumn({
   const starters = team.entries.filter((e) => e.isStarter);
   const subs = team.entries.filter((e) => !e.isStarter);
 
+  // the whole row is a button (valid: button inside li) when the player has
+  // an id and the parent handles player dialogs
   const PlayerLine = ({
     entry,
     dim,
   }: {
     entry: (typeof team.entries)[number];
     dim?: boolean;
-  }) => (
-    <li className={`flex items-center gap-2 py-1 text-[12.5px] ${dim ? "text-[#5b6b80]" : "text-[#1c2b3a]"}`}>
-      <span className="w-6 shrink-0 text-end font-bold tabular-nums text-[#4a6b96]">
-        {entry.shirtNumber ?? ""}
-      </span>
-      <span className={`min-w-0 flex-1 truncate font-medium ${dim ? "" : "font-semibold"}`}>
-        <PlayerName
-          name={nameOf(entry.person, lang)}
-          id={entry.person?.id || null}
-          onOpenPlayer={onOpenPlayer}
-        />
-        {entry.isCaptain && (
-          <span className="ms-1 rounded bg-[#e8eff9] px-1 text-[10px] font-bold text-[#17457f]">
-            {s.captain}
+  }) => {
+    const clickable = !!onOpenPlayer && !!entry.person.id;
+    const row = (
+      <>
+        <span className="w-6 shrink-0 text-end font-bold tabular-nums text-[#4a6b96]">
+          {entry.shirtNumber ?? ""}
+        </span>
+        <span className={`min-w-0 flex-1 truncate font-medium ${dim ? "" : "font-semibold"}`}>
+          {nameOf(entry.person, lang)}
+          {entry.isCaptain && (
+            <span className="ms-1 rounded bg-[#e8eff9] px-1 text-[10px] font-bold text-[#17457f]">
+              {s.captain}
+            </span>
+          )}
+        </span>
+        {entry.rating !== null && entry.rating !== undefined && (
+          <span className="shrink-0 rounded bg-[#eef3fa] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-[#33455e]">
+            {entry.rating}
           </span>
         )}
-      </span>
-      {entry.rating !== null && entry.rating !== undefined && (
-        <span className="shrink-0 rounded bg-[#eef3fa] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-[#33455e]">
-          {entry.rating}
-        </span>
-      )}
-    </li>
-  );
+      </>
+    );
+    if (!clickable) {
+      return (
+        <li className={`flex items-center gap-2 py-1 text-[12.5px] ${dim ? "text-[#5b6b80]" : "text-[#1c2b3a]"}`}>
+          {row}
+        </li>
+      );
+    }
+    return (
+      <li>
+        <button
+          type="button"
+          onClick={() =>
+            onOpenPlayer?.({
+              id: entry.person.id!,
+              nameEn: entry.person.nameEn,
+              nameAr: entry.person.nameAr,
+            })
+          }
+          title={s.playerInfo}
+          className={`flex w-full items-center gap-2 rounded px-1 py-1 text-start text-[12.5px] transition-colors hover:bg-[#e8f1fb] focus:outline-none ${
+            dim ? "text-[#5b6b80]" : "text-[#1c2b3a]"
+          }`}
+        >
+          {row}
+        </button>
+      </li>
+    );
+  };
 
   return (
     <div className="rounded-md border border-[#dbe4ef] bg-white">

@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getPlayerDetail } from "@/lib/goal/service";
+import { getPlayer } from "@/lib/goal/service";
 import { relayConditional } from "@/lib/goal/proxy";
 
 /**
  * GET /api/player/[id]
  *
- * Thin proxy to the Python scraper backend - player drill-down (bio, career
- * history, last appearances). Read-only: served straight from the database
- * (profiles are fetched by the scraper's `players` / `bootstrap` walks).
+ * Thin proxy to the Python scraper backend - player profile: bilingual bio
+ * (position, height, weight, nationality, birth data) plus the full career
+ * history, straight from the database. An unprofiled player is scraped
+ * on demand upstream (same contract as match details). If-None-Match is
+ * forwarded and the backend's 304 relayed.
  */
 export const dynamic = "force-dynamic";
 
@@ -20,6 +22,6 @@ export async function GET(
     return NextResponse.json({ error: "invalid player id" }, { status: 400 });
   }
 
-  const detail = await getPlayerDetail(id, req.headers.get("if-none-match"));
-  return relayConditional(detail);
+  const player = await getPlayer(id, req.headers.get("if-none-match"));
+  return relayConditional(player);
 }

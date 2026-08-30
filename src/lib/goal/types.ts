@@ -206,73 +206,44 @@ export interface MatchDetail {
 }
 
 // ---------------------------------------------------------------------------
-// team page (click a team -> info + results + fixtures + table rows)
+// team feature (profile + results/fixtures + squad)
 // ---------------------------------------------------------------------------
-export interface TeamStandingGroup {
-  competition: CompetitionRef;
-  seasonName: string | null;
-  rows: {
-    teamId: string;
-    teamNameEn: string | null;
-    teamNameAr: string | null;
-    /** true for the team this dialog is about (highlight the row) */
-    mine: boolean;
-    position: number;
-    played: number | null;
-    win: number | null;
-    draw: number | null;
-    lose: number | null;
-    goalsFor: number | null;
-    goalsAgainst: number | null;
-    goalDiff: number | null;
-    points: number | null;
-  }[];
-}
 
-export interface TeamDetail {
-  team: TeamRef;
-  results: MatchRow[];
-  fixtures: MatchRow[];
-  standings: TeamStandingGroup[];
-}
-
-// ---------------------------------------------------------------------------
-// player page (click a player -> bio + career + last appearances)
-// ---------------------------------------------------------------------------
-export interface PlayerBio {
+/** One squad member of a team (sparse: only profiled players carry metadata). */
+export interface SquadPlayer {
   id: string;
   nameEn: string | null;
   nameAr: string | null;
-  fullNameEn: string | null;
-  fullNameAr: string | null;
-  slugEn: string | null;
-  slugAr: string | null;
-  imageUrl: string | null;
   position: string | null; // GOALKEEPER / DEFENDER / MIDFIELDER / FORWARD
   shirtNumber: number | null;
-  heightCm: number | null;
-  weightKg: number | null;
-  birthDate: string | null; // ISO YYYY-MM-DD
-  age: number | null;
-  nationalityEn: string | null;
-  nationalityAr: string | null;
-  countryOfBirthEn: string | null;
-  countryOfBirthAr: string | null;
-  placeOfBirthEn: string | null;
-  placeOfBirthAr: string | null;
-  isVerified: boolean;
-  /** false = the profile page was never fetched (bio is just lineup scraps) */
-  profileFetched: boolean;
+  imageUrl?: string | null;
 }
 
-export interface CareerEntry {
-  teamId: string | null;
-  teamNameEn: string | null;
-  teamNameAr: string | null;
+/** GET /api/team/:id - team profile for the team dialog / team page. */
+export interface TeamInfo {
+  team: TeamRef;
+  /** finished/live matches, most recent first */
+  recentMatches: MatchRow[];
+  /** upcoming fixtures, soonest first */
+  upcomingMatches: MatchRow[];
+  /** known squad (players stored with this club as current club) */
+  squad: SquadPlayer[];
+  generatedAt?: string;
+}
+
+// ---------------------------------------------------------------------------
+// player feature (bio + career history)
+// ---------------------------------------------------------------------------
+
+/** One club stint of a player's career ("club × season × competition"). */
+export interface PlayerCareerEntry {
+  team: TeamRef;
   seasonName: string | null;
-  competitionId: string | null;
-  competitionNameEn: string | null;
-  competitionNameAr: string | null;
+  competition: {
+    id: string | null;
+    nameEn: string | null;
+    nameAr: string | null;
+  };
   appearances: number | null;
   goals: number | null;
   assists: number | null;
@@ -282,24 +253,32 @@ export interface CareerEntry {
   isLoan: boolean;
 }
 
-export interface AppearanceRow {
-  matchId: string;
-  kickoffUtc: string | null;
-  status: string;
-  homeScore: number | null;
-  awayScore: number | null;
-  isStarter: boolean;
+/** The bio block of GET /api/player/:id. */
+export interface PlayerBio {
+  id: string;
+  nameEn: string | null;
+  nameAr: string | null;
+  fullNameEn: string | null;
+  fullNameAr: string | null;
+  imageUrl?: string | null;
+  position: string | null;
   shirtNumber: number | null;
-  rating: number | null;
-  homeTeam: TeamRef;
-  awayTeam: TeamRef;
-  competitionNameEn: string | null;
-  competitionNameAr: string | null;
+  heightCm: number | null;
+  weightKg: number | null;
+  birthDate: string | null;
+  age: number | null;
+  nationalityEn: string | null;
+  nationalityAr: string | null;
+  placeOfBirthEn: string | null;
+  placeOfBirthAr: string | null;
 }
 
+/** GET /api/player/:id - player profile for the player dialog / player page. */
 export interface PlayerDetail {
   player: PlayerBio;
   currentClub: TeamRef | null;
-  career: CareerEntry[];
-  appearances: AppearanceRow[];
+  career: PlayerCareerEntry[];
+  /** false when the profile pages were never scraped (bare name row) */
+  profileFetched?: boolean;
+  generatedAt?: string;
 }

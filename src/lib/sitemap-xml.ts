@@ -20,7 +20,7 @@
  */
 import type { ListingResponse } from "@/lib/goal/types";
 import { getDayListing } from "@/lib/goal/service";
-import { compUrlPair, matchUrlPair, utcToday } from "@/lib/seo";
+import { compUrlPair, matchUrlPair, teamUrlPair, utcToday } from "@/lib/seo";
 
 /** how many PAST days get a day-listing URL in the sitemap (results pages) */
 export const SITEMAP_DAYS_PAST = 7;
@@ -34,6 +34,10 @@ export const MAX_MATCH_URLS = 2_000;
 export const COMPETITIONS_PER_SITEMAP = 500;
 /** total cap on discovered competition URLs (AR + EN per competition) */
 export const MAX_COMPETITION_URLS = 1_000;
+/** max team URLs per /sitemaps/teams-N.xml file */
+export const TEAMS_PER_SITEMAP = 500;
+/** total cap on discovered team URLs (AR + EN per team) */
+export const MAX_TEAM_URLS = 2_000;
 /** true -> only major-competition matches in the sitemap (quality over
  *  quantity: obscure matches would send crawlers hammering /api/match/:id) */
 export const SITEMAP_MAJOR_ONLY = true;
@@ -256,4 +260,35 @@ export async function collectCompetitionUrls(base: string): Promise<string[]> {
 /** Number of /sitemaps/competitions-N.xml chunks for a URL count. */
 export function competitionChunkCount(urlCount: number): number {
   return Math.max(1, Math.ceil(urlCount / COMPETITIONS_PER_SITEMAP));
+}
+
+/**
+ * Absolute team-page URLs - BOTH languages per team (Arabic slug URL +
+ * English slug URL), discovered from the teams of today's + yesterday's
+ * listings. Each team page links on to its matches and squad players, so
+ * crawlers can walk from here to the player pages too.
+ */
+export async function collectTeamUrls(base: string): Promise<string[]> {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const listing of await windowListings()) {
+    for (const g of listing.groups) {
+      for (const m of g.matches) {
+        for (const team of [m.homeTeam, m.awayTeam]) {
+          if (!team?.id || seen.has(team.id)) continue;
+          seen.add(team.id);
+          const pair = teamUrlPair(team.id, team);
+          urls.push(`${base}${pair.ar}`);
+          urls.push(`${base}${pair.en}`);
+          if (urls.length >= MAX_TEAM_URLS) return urls;
+        }
+      }
+    }
+  }
+  return urls;
+}
+
+/** Number of /sitemaps/teams-N.xml chunks for a URL count. */
+export function teamChunkCount(urlCount: number): number {
+  return Math.max(1, Math.ceil(urlCount / TEAMS_PER_SITEMAP));
 }

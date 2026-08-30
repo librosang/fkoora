@@ -21,5 +21,11 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/", "/match/:path*", "/competition/:path*"],
+  matcher: [
+    "/",
+    "/match/:path*",
+    "/competition/:path*",
+    "/team/:path*",
+    "/player/:path*",
+  ],
 };

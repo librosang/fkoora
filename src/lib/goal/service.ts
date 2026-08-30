@@ -24,7 +24,7 @@ import type {
   ListingResponse,
   MatchDetail,
   PlayerDetail,
-  TeamDetail,
+  TeamInfo,
 } from "./types";
 
 const API_BASE = process.env.FOOTBALL_API_BASE || "http://127.0.0.1:9000";
@@ -136,25 +136,27 @@ export async function getCompetitionMatches(
 }
 
 // ---------------------------------------------------------------------------
-// team page (info + recent results + fixtures + table rows)
+// team profile (recent results + upcoming fixtures + squad)
 // ---------------------------------------------------------------------------
-export async function getTeamDetail(
+export async function getTeam(
   teamId: string,
   ifNoneMatch?: string | null,
-): Promise<ConditionalResult<TeamDetail>> {
-  return getConditional<TeamDetail>(
+): Promise<ConditionalResult<TeamInfo>> {
+  return getConditional<TeamInfo>(
     `/api/team/${encodeURIComponent(teamId)}`,
     ifNoneMatch,
   );
 }
 
 // ---------------------------------------------------------------------------
-// player page (bio + career history + last appearances)
+// player profile (bio + career history)
 // ---------------------------------------------------------------------------
-export async function getPlayerDetail(
+export async function getPlayer(
   playerId: string,
   ifNoneMatch?: string | null,
 ): Promise<ConditionalResult<PlayerDetail>> {
+  // an unprofiled player triggers a synchronous profile scrape upstream -
+  // same generous timeout as match details
   return getConditional<PlayerDetail>(
     `/api/player/${encodeURIComponent(playerId)}`,
     ifNoneMatch,

@@ -1,8 +1,10 @@
 import {
   collectMatchUrls,
   collectCompetitionUrls,
+  collectTeamUrls,
   competitionChunkCount,
   matchChunkCount,
+  teamChunkCount,
   sitemapIndexXml,
   windowMonths,
   XML_HEADERS,
@@ -19,6 +21,11 @@ import { siteUrl, utcToday } from "@/lib/seo";
  *   /sitemaps/matches-N.xml         - match pages, 500 URLs per file (AR + EN
  *                                     slug URLs per match)
  *   /sitemaps/competitions-N.xml    - competition pages, 500 URLs per file
+ *   /sitemaps/teams-N.xml           - team pages, 500 URLs per file (AR + EN
+ *                                     slug URLs per team)
+ *
+ * Player pages are discovered through the team pages' squad links (each
+ * team page server-renders real <a href>s to its players' pages).
  *
  * Generated at REQUEST time (never frozen at build): the rolling day window
  * advances, freshly played matches appear and runtime SITE_URL changes are
@@ -50,6 +57,12 @@ export async function GET() {
   const competitionUrls = await collectCompetitionUrls(base);
   for (let i = 1; i <= competitionChunkCount(competitionUrls.length); i++) {
     items.push({ loc: `${base}/sitemaps/competitions-${i}.xml`, lastmod: now });
+  }
+
+  // team sitemaps: same chunking (at least one entry)
+  const teamUrls = await collectTeamUrls(base);
+  for (let i = 1; i <= teamChunkCount(teamUrls.length); i++) {
+    items.push({ loc: `${base}/sitemaps/teams-${i}.xml`, lastmod: now });
   }
 
   return new Response(sitemapIndexXml(items), { headers: XML_HEADERS });

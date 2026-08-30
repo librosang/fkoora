@@ -18,6 +18,7 @@ import type {
   MatchRow,
   StandingsMarker,
   StandingsTable,
+  TeamRef,
 } from "@/lib/goal/types";
 import { compLabel, formatTime, nameOf, statusDisplay, t } from "@/lib/i18n";
 import { Crest } from "./crest";
@@ -28,8 +29,8 @@ interface CompetitionDialogProps {
   onClose: () => void;
   /** open the match dialog for a match inside the selected round */
   onOpenMatch: (m: MatchRow) => void;
-  /** optional drill-down: click a standings team -> team dialog */
-  onOpenTeam?: (teamId: string) => void;
+  /** open the team dialog for a team in the standings table */
+  onOpenTeam?: (team: TeamRef) => void;
 }
 
 /**
@@ -329,7 +330,7 @@ function StandingsView({
   markers: StandingsMarker[];
   lang: Lang;
   strings: ReturnType<typeof t>;
-  onOpenTeam?: (teamId: string) => void;
+  onOpenTeam?: (team: TeamRef) => void;
 }) {
   const markerById = useMemo(
     () => Object.fromEntries(markers.map((m) => [m.id, m])),
@@ -383,17 +384,28 @@ function StandingsView({
                         </span>
                       </td>
                       <td className="px-2 py-1.5">
-                        <button
-                          type="button"
-                          onClick={() => onOpenTeam?.(r.team.id)}
-                          disabled={!onOpenTeam}
-                          className={`flex min-w-0 items-center gap-1.5 text-start ${onOpenTeam ? "cursor-pointer rounded hover:underline" : ""}`}
-                        >
-                          <Crest url={r.team.crestUrl} size={17} />
-                          <span className="truncate font-semibold text-[#1c2b3a]">
-                            {nameOf(r.team, lang)}
+                        {/* team cell: a button (valid inside td) that opens the
+                            team dialog when the parent handles it */}
+                        {onOpenTeam && r.team.id ? (
+                          <button
+                            type="button"
+                            onClick={() => onOpenTeam(r.team)}
+                            title={s.teamInfo}
+                            className="group/team flex min-w-0 items-center gap-1.5 rounded px-0.5 py-0.5 text-start transition-colors hover:bg-[#e8f1fb] focus:outline-none"
+                          >
+                            <Crest url={r.team.crestUrl} size={17} />
+                            <span className="truncate font-semibold text-[#1c2b3a] underline-offset-2 group-hover/team:underline">
+                              {nameOf(r.team, lang)}
+                            </span>
+                          </button>
+                        ) : (
+                          <span className="flex min-w-0 items-center gap-1.5">
+                            <Crest url={r.team.crestUrl} size={17} />
+                            <span className="truncate font-semibold text-[#1c2b3a]">
+                              {nameOf(r.team, lang)}
+                            </span>
                           </span>
-                        </button>
+                        )}
                       </td>
                       <td className="px-1 py-1.5 text-center tabular-nums text-[#33455e]">{r.played}</td>
                       <td className="hidden px-1 py-1.5 text-center tabular-nums text-[#33455e] md:table-cell">{r.win}</td>
