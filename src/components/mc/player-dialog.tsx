@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Dialog,
   DialogClose,
@@ -69,22 +69,51 @@ export function PlayerDialog({
     detail && detail.player.id === playerId ? detail : null;
   const currentError = error && errorFor === playerId;
 
+  const loadEpoch = useRef(0);
+
   const load = useCallback(async () => {
     if (!playerId) return;
     setError(false);
+    const epoch = ++loadEpoch.current;
     try {
-      const res = await fetch(`/api/player/${encodeURIComponent(playerId)}`);
+      let res = await fetch(`/api/player/${encodeURIComponent(playerId)}`);
+      // A 404 can mean the player is known but their profile pages have not
+      // been fetched yet: the read-only backend records the gap and the
+      // scraper worker fills it within seconds - retry before erroring.
+      for (let attempt = 0; attempt < 2 && res.status === 404; attempt++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        if (epoch !== loadEpoch.current) return; // player changed meanwhile
+        res = await fetch(`/api/player/${encodeURIComponent(playerId)}`);
+      }
       if (!res.ok) throw new Error("failed");
-      setDetail(await res.json());
+      if (epoch !== loadEpoch.current) return;
+      const data: PlayerDetail = await res.json();
+      setDetail(data);
+      // Stub row (name from lineups, no bio/career yet): the worker is
+      // fetching the profile right now - quietly re-fetch once so the
+      // career history appears without reopening the dialog.
+      if (!data.profileFetched) {
+        await new Promise((r) => setTimeout(r, 6000));
+        if (epoch !== loadEpoch.current) return;
+        const again = await fetch(`/api/player/${encodeURIComponent(playerId)}`);
+        if (again.ok && epoch === loadEpoch.current) {
+          setDetail(await again.json());
+        }
+      }
     } catch {
-      setError(true);
-      setErrorFor(playerId);
+      if (epoch === loadEpoch.current) {
+        setError(true);
+        setErrorFor(playerId);
+      }
     }
   }, [playerId]);
 
   // data effect: seed from SSR detail when it belongs to this player, else fetch
   useEffect(() => {
-    if (!player) return;
+    if (!player) {
+      loadEpoch.current++; // stop any in-flight retry loop
+      return;
+    }
     if (initialDetail && initialDetail.player.id === player.id) {
       setDetail(initialDetail);
       return;

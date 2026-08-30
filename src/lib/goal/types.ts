@@ -203,6 +203,9 @@ export interface MatchDetail {
     away?: LineupTeam;
   };
   stats: StatRow[];
+  /** true when the detail rows are still being fetched by the scraper worker
+   *  (thin detail served meanwhile) - re-fetch in a few seconds */
+  refreshing?: boolean;
 }
 
 // ---------------------------------------------------------------------------

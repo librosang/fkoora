@@ -1,6 +1,6 @@
 # Deploying Fkoora (match-center) with Docker
 
-Production topology for this project is three containers:
+Production topology for this project is five containers:
 
 ```
 Internet
@@ -14,44 +14,58 @@ Nginx Proxy Manager (:80/:443, container `nginxproxymanager`)
    ├── fkoora.site / www.fkoora.site ──▶ fkoora-frontend :3000   (Next.js)
    │                                         │  server-side proxy
    │                                         ▼
-   └── (optional) api.fkoora.site ──────▶ fkoora-api :8000        (Flask)
-                                              │
-                                              ▼
-                                     fkoora-postgres :5432       (PostgreSQL 16)
+   └── (optional) api.fkoora.site ──────▶ fkoora-api :9000        (Flask, read-only)
+                                              │    │                │ refresh_jobs /
+                                              │    │ Redis hits     │ competition_views
+                                              │    ▼                ▼
+                                              │ fkoora-redis   fkoora-postgres :5432
+                                              │ (response        ▲         ▲
+                                              │  cache)          │ SQL     │ invalidations
+                                              └──────────▶ fkoora-worker (scheduler + job
+                                                            queue, talks to goal.com,
+                                                            DELs cache keys on write)
 ```
 
 **Why api.fkoora.site is optional:** the Next.js server proxies every
 `/api/*` request (data *and* images) to the Flask API over the Docker
-network (`FOOTBALL_API_BASE=http://fkoora-api:8000`). The browser only ever
+network (`FOOTBALL_API_BASE=http://fkoora-api:9000`). The browser only ever
 talks to the Next.js server, so the API never has to be reachable from the
 Internet. Expose `api.fkoora.site` through NPM only if you want it for
 debugging/monitoring.
 
-**Scale-out is now safe (scheduler leadership):** the API keeps the database
-fresh with a built-in scheduler thread (today's listings every 60 s,
-neighbouring days adaptively every 5 min / 30 min, live match details every
-2 min, slow backfill). The scheduler elects exactly ONE leader across all
-API processes via a PostgreSQL advisory lock (`SCHEDULER_ROLE=auto`, the
-default): run several gunicorn workers or replicas and only one of them
-scrapes — the others stand by and take over automatically if it dies, so
-goal.com traffic never multiplies with your worker count. Prefer one worker
-+ threads for a personal site (the workload is I/O bound); when you do scale
-out, mind the per-process DB pool (`DB_POOL_MIN`/`DB_POOL_MAX`, default 1/8)
-against PostgreSQL's `max_connections`. `API_ENABLE_SCHEDULER=0` (or
-`SCHEDULER_ROLE=off`) still disables the scheduler entirely for external
-`/api/cron/refresh`-driven setups. `GET /api/health` shows which process is
-the current leader.
+**API and scraper are SPLIT into two processes** (one image, two
+containers): `fkoora-api` is a pure database reader - it serves the
+frontend and never talks to goal.com. When it notices missing/empty/stale
+data it serves what it has, flags `refreshing: true` and writes a
+`refresh_jobs` row. `fkoora-worker` (SERVICE_ROLE=worker) picks those rows
+up within seconds, runs the freshness scheduler (today's listings every
+60 s, neighbouring days adaptively every 5/30 min, live match details every
+2 min, slow backfill, event-driven standings refresh ~1 min after the
+final whistle) and is the ONLY process that talks to goal.com. The two
+never share memory - they coordinate entirely through two tiny tables
+(`refresh_jobs`, `competition_views`), which is what makes the split safe:
+the API can restart, scale or crash without touching scraper state, and
+vice versa. Run several worker containers if you like - they elect
+exactly ONE leader via a PostgreSQL advisory lock (`SCHEDULER_ROLE=auto`,
+the default); the others stand by and take over automatically.
+
+**Legacy single container:** `SERVICE_ROLE=all` runs a background worker
+next to gunicorn in ONE container (the pre-split behavior) if you do not
+want separate containers. The default role is `api` (read-only).
 
 **Traffic discipline:** JSON endpoints serve conditional responses (strong
-ETag → `304` when unchanged, forwarded by the Next.js proxies), images are
-disk-cached + memory-LRU'd and revalidate with `304`s, and the scraper
-fetches Arabic pages on slow 10-minute cycles (names change a few times per
-season; EN pages carry the minute-by-minute scores). Together these keep
-both goal.com traffic and user-facing bandwidth flat as usage grows.
+ETag → `304` when unchanged, forwarded by the Next.js proxies) **and** a
+shared Redis response cache sits in front of PostgreSQL (one Redis GET per
+hit; the worker deletes the affected keys the moment fresh data lands, so
+a hit is never a stale score). Images are disk-cached + memory-LRU'd and
+revalidate with `304`s, and the worker fetches Arabic pages on slow
+10-minute cycles (names change a few times per season; EN pages carry the
+minute-by-minute scores). Together these keep both goal.com traffic,
+database load and user-facing bandwidth flat as usage grows.
 
-**No manual DB setup:** the schema is applied idempotently on first start
+**No manual DB setup:** the schema is applied idempotently on every start
 (`CREATE TABLE IF NOT EXISTS` in `scraper/db/schema.sql`). A fresh volume just
-works; the first scheduler tick (within a minute) starts filling it.
+works; the first worker tick (within a minute) starts filling it.
 
 ---
 
@@ -62,14 +76,18 @@ Put the repository next to your main `docker-compose.yml`:
 ```
 /srv/compose/                 (wherever your docker-compose.yml lives)
 ├── docker-compose.yml        (your infra + the fkoora-* services)
-├── nginx-proxy-manager/
-├── mysql/
-├── ...
+│                              └─ adopt docker-compose.fkoora-full.yml:
+│                                 YOUR stack verbatim, fkoora block migrated
+├── nginx-proxy-manager/  mysql/  immich/  oscam/  tauri-portal/
+├── postgres-data/            (fkoora PostgreSQL volume - keep as is!)
 └── fkoora/                   <- this repo
-    ├── Dockerfile               (Flask API image)
-    ├── Dockerfile.frontend      (Next.js image)
-    ├── docker-compose.yml       (standalone variant, for isolated testing)
-    ├── scraper/                 (Python package: API + scraper + schema)
+    ├── Dockerfile.api          (Flask API + worker image - ONE image)
+    ├── Dockerfile.frontend     (Next.js image)
+    ├── docker-compose.yml           (standalone: whole stack on loopback,
+    │                                 for isolated local testing)
+    ├── docker-compose.fkoora-full.yml (your exact stack merged: + worker,
+    │                                 + fkoora-redis, api made read-only)
+    ├── scraper/                 (Python package: API + worker + schema)
     ├── src/                     (Next.js app)
     ├── package.json, bun.lock
     └── DEPLOY.md                (this file)
@@ -77,84 +95,170 @@ Put the repository next to your main `docker-compose.yml`:
 
 ## 2. Add the services to your compose
 
-The complete merged file is shipped alongside this repo
-(`docker-compose.fkoora-full.yml`). The fkoora part of it, for reference:
+The shipped `docker-compose.fkoora-full.yml` is **your actual stack**
+(NPM, MariaDB, OpenLiteSpeed, tauri-portal, adminer, redis, Immich, oscam
+- all verbatim) with ONLY the fkoora block migrated. Diff it against your
+live `docker-compose.yml`, then either copy it over or copy just the
+`fkoora-*` services into yours. The fkoora part of it, for reference:
 
 ```yaml
-  fkoora-postgres:
+  fkoora-postgres:            # UNCHANGED - same volume, same loopback port
     image: postgres:16-alpine
     container_name: fkoora_postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: fkoora
       POSTGRES_USER: fkoora
-      POSTGRES_PASSWORD: CHANGE_THIS_PASSWORD     # <-- change!
+      POSTGRES_PASSWORD: fuckkoora
     volumes:
-      - ./fkoora/postgres:/var/lib/postgresql/data
-    networks: [webnet]
+      - ./postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    networks:
+      - webnet
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U fkoora -d fkoora"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  fkoora-api:
-    build: { context: ./fkoora, dockerfile: Dockerfile }
+  fkoora-redis:               # NEW - dedicated response cache (like immich-redis)
+    image: redis:7-alpine
+    container_name: fkoora_redis
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "256mb",
+              "--maxmemory-policy", "allkeys-lru",
+              "--save", "", "--appendonly", "no"]
+    networks:
+      - webnet
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  fkoora-api:                 # CHANGED - read-only role + REDIS_URL
+    build:
+      context: ./fkoora
+      dockerfile: Dockerfile.api
     container_name: fkoora_api
     restart: unless-stopped
     environment:
-      FOOTBALL_DB_URL: postgresql://fkoora:CHANGE_THIS_PASSWORD@fkoora-postgres:5432/fkoora
+      SERVICE_ROLE: api                       # read-only API (the default)
+      FOOTBALL_DB_URL: postgresql://fkoora:fuckkoora@fkoora-postgres:5432/fkoora
+      REDIS_URL: redis://fkoora-redis:6379/0  # shared response cache
     volumes:
-      - ./fkoora/img_cache:/app/img_cache
-    expose: ["8000"]
-    networks: [webnet]
+      - ./fkoora/img_cache:/app/img_cache     # crest/logo cache (shared w/ worker)
+    networks:
+      - webnet
     depends_on:
-      fkoora-postgres: { condition: service_healthy }
+      fkoora-postgres:
+        condition: service_healthy
+      fkoora-redis:
+        condition: service_healthy
 
-  fkoora-frontend:
-    build: { context: ./fkoora, dockerfile: Dockerfile.frontend }
+  fkoora-worker:              # NEW - the ONLY process talking to goal.com
+    build:
+      context: ./fkoora
+      dockerfile: Dockerfile.api              # same image as the API
+    container_name: fkoora_worker
+    restart: unless-stopped
+    environment:
+      SERVICE_ROLE: worker                    # scheduler + refresh_jobs consumer
+      FOOTBALL_DB_URL: postgresql://fkoora:fuckkoora@fkoora-postgres:5432/fkoora
+      REDIS_URL: redis://fkoora-redis:6379/0  # invalidates the cache on write
+      # BOOTSTRAP_ON_START: "1"               # one-time historical walk
+    volumes:
+      - ./fkoora/img_cache:/app/img_cache     # shared with the API (pre-warm)
+    networks:
+      - webnet                                # no ports: never serves HTTP
+    depends_on:
+      fkoora-postgres:
+        condition: service_healthy
+      fkoora-redis:
+        condition: service_healthy
+
+  fkoora-frontend:            # UNCHANGED
+    build:
+      context: ./fkoora
+      dockerfile: Dockerfile.frontend
     container_name: fkoora_frontend
     restart: unless-stopped
     environment:
-      FOOTBALL_API_BASE: http://fkoora-api:8000
-    expose: ["3000"]
-    networks: [webnet]
+      FOOTBALL_API_BASE: http://fkoora_api:9000
+    ports:
+      - "3000:3000"
+    networks:
+      - webnet
     depends_on:
-      fkoora-api: { condition: service_healthy }
+      fkoora-api:
+        condition: service_healthy
 ```
 
 Notes:
 
-* `expose` (not `ports`) - NPM reaches the containers over `webnet`, nothing
-  is published to the host/Internet. For isolated local testing use the
-  repo's own `docker-compose.yml` instead (it maps `127.0.0.1:3000/8000`).
-* Change `CHANGE_THIS_PASSWORD` in **both** places (postgres env +
-  `FOOTBALL_DB_URL`) to the same long random string.
+* **Diff-first:** everything outside the `fkoora-*` services in the shipped
+  file is byte-identical to your current compose. The only changes are the
+  `fkoora-api` environment (read-only role + `REDIS_URL`) and the two new
+  services (`fkoora-worker`, `fkoora-redis`).
+* **No data migration:** `./postgres-data` and `./fkoora/img_cache` are
+  reused verbatim; the two coordination tables (`refresh_jobs`,
+  `competition_views`) create themselves on first start.
+* **Your shared `redis` service:** the default here is a dedicated
+  `fkoora-redis` (same pattern as your `immich-redis`) so its `allkeys-lru`
+  eviction can never evict another app's keys. To reuse the shared instance
+  instead, delete `fkoora-redis` and set
+  `REDIS_URL: redis://redis:6379/0` on api + worker - fkoora keys are
+  namespaced `fk:api:v1:*` and all carry TTLs, so they coexist safely; just
+  do **not** add `allkeys-lru` to the shared instance itself.
+* Keep `POSTGRES_PASSWORD` and both `FOOTBALL_DB_URL`s in sync (they
+  already are in the shipped file).
+* `fkoora-worker` publishes no ports at all - it never serves HTTP, it only
+  scrapes. Prefer it over stacking `SERVICE_ROLE=all` on the api container:
+  separate restarts, separate logs, scraper crashes never take the API down.
+* `REDIS_URL` must be set on **both** `fkoora-api` and `fkoora-worker`:
+  the API caches responses under the keys, the worker drops them when new
+  data lands. Omit it on both to run cache-less (the API then reads
+  PostgreSQL on every request - still correct, just more DB work).
+* Host ports stay as they were: frontend `3000:3000`, postgres
+  `127.0.0.1:5433:5432`; `fkoora-api` (internal :9000) and `fkoora-redis`
+  publish nothing. NPM can also forward straight to `fkoora-frontend:3000`
+  over webnet if you ever want the host port gone. For isolated local
+  testing use the repo's own `docker-compose.yml` (loopback ports).
 * This PostgreSQL is dedicated to Fkoora. Do **not** point it at MariaDB or
   at the Immich `immich-db` container - separate apps, separate databases.
 
 ## 3. First start
 
 ```bash
-docker compose up -d --build fkoora-postgres fkoora-api fkoora-frontend
-docker compose logs -f fkoora-api        # schema applies, scheduler starts
+# from the directory holding your (merged) docker-compose.yml:
+docker compose up -d --build fkoora-redis fkoora-api fkoora-worker
+docker compose logs -f fkoora-worker     # schema applies, scheduler starts
+docker compose logs -f fkoora-api        # read-only API serving
 ```
 
-Within ~1 minute the scheduler scrapes today's listings; give it a few
+`fkoora-postgres` and `fkoora-frontend` keep their existing containers
+(unchanged config); the one-time rebuild is needed because
+`requirements.txt` gained the `redis` package. If you adopted the whole
+merged file, a plain `docker compose up -d --build` works too - it leaves
+every non-fkoora service untouched.
+
+Within ~1 minute the worker scrapes today's listings; give it a few
 minutes for details of big competitions. To force a full day immediately:
 
 ```bash
-docker compose exec fkoora-api python -m scraper.cli date 2026-08-29
+docker compose exec fkoora-worker python -m scraper.cli date 2026-08-29
 # backfill a range / fetch details:
-docker compose exec fkoora-api python -m scraper.cli backfill --from 2026-08-01 --to 2026-08-28
-docker compose exec fkoora-api python -m scraper.cli enrich
+docker compose exec fkoora-worker python -m scraper.cli backfill --from 2026-08-01 --to 2026-08-28
+docker compose exec fkoora-worker python -m scraper.cli enrich
 ```
 
 Sanity checks:
 
 ```bash
-docker compose exec fkoora-api python -m scraper.cli stats
-curl http://fkoora-api:8000/api/health    # from any container on webnet
+docker compose exec fkoora-worker python -m scraper.cli stats
+curl http://fkoora-api:9000/api/health    # from any container on webnet
+                                          # ("cache" shows redis connectivity)
 ```
 
 ## 4. Nginx Proxy Manager
@@ -176,7 +280,7 @@ Optional API host (debug only):
 |---|---|
 | Domain | `api.fkoora.site` |
 | Forward host | `fkoora-api` |
-| Forward port | `8000` |
+| Forward port | `9000` |
 
 Enable "Request a new SSL certificate" + Force SSL on each host.
 
@@ -204,28 +308,80 @@ DNS records for the three hostnames: CNAME to the tunnel (`<tunnel-id>.cfargotun
 
 ## 6. Environment variables reference
 
-**fkoora-api**
+**fkoora-api** (read-only API)
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `SERVICE_ROLE` | `api` | `api` (read-only) \| `worker` \| `all` (legacy both-in-one) |
 | `FOOTBALL_DB_URL` | `postgresql://localhost:5432/football` | PostgreSQL DSN |
-| `API_ENABLE_SCHEDULER` | `1` | `0` disables the in-process scheduler |
+| `REDIS_URL` | *(empty = cache off)* | shared response cache, e.g. `redis://fkoora-redis:6379/0` |
 | `API_CRON_SECRET` | *(empty = open)* | protects `/api/cron/refresh` |
 | `IMG_CACHE_DIR` | `/app/img_cache` | crest/logo disk cache (mount a volume) |
+| `IMG_MEM_CACHE_MB` | `128` | in-memory hot image LRU |
+| `DB_POOL_MIN` / `DB_POOL_MAX` | `1` / `8` | per-process PostgreSQL pool |
+| `COMPETITION_TTL_SEC` | `1800` | staleness window for standings/rounds |
+| `ON_DEMAND_RETRY_SEC` | `600` | re-request window for failed data-gap jobs |
+| `API_CACHE_TTL_*` | see `scraper/apicache.py` | per-endpoint cache TTLs (`LISTING_TODAY/PAST/FUTURE`, `MATCH_LIVE/DONE/UPCOMING`, `COMPETITION`, `TEAM`, `PLAYER`, ...) |
 | `IMAGE_PROXY_SECRET` | built-in default | HMAC key for image tokens |
+
+**fkoora-worker** (scraper)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SERVICE_ROLE` | `worker` | must be `worker` here |
+| `FOOTBALL_DB_URL` | same as API | PostgreSQL DSN |
+| `REDIS_URL` | *(empty = no invalidation)* | same value as the API - enables cache invalidation after every scrape |
+| `SCHEDULER_ROLE` | `auto` | `auto` \| `force` \| `off` (leader election; `off` = jobs only) |
+| `WORKER_POLL_SEC` | `4` | refresh_jobs poll cadence |
 | `REFRESH_TODAY_SEC` / `REFRESH_AROUND_SEC` / `ENRICH_LIVE_SEC` / `ENRICH_BACKFILL_SEC` | 60 / 300 / 120 / 1800 | scheduler intervals (0 = off) |
+| `AR_LISTING_SEC` / `AR_DETAIL_SEC` | 600 / 600 | slow Arabic name cycles |
+| `COMP_REFRESH_SEC` / `COMP_VIEW_TRACK_SEC` | 1800 / 21600 | viewed-leagues warm cycle |
+| `MAX_JOB_ATTEMPTS` | `3` | retries before a failing job is retired |
+| `BOOTSTRAP_ON_START` | `0` | one-time historical walk on container start |
 
 **fkoora-frontend**
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `FOOTBALL_API_BASE` | `http://127.0.0.1:8000` | Flask API base URL (**server-side**, container-to-container) |
+| `FOOTBALL_API_BASE` | `http://127.0.0.1:9000` | Flask API base URL (**server-side**, container-to-container) |
 | `CRON_SECRET` | *(empty = open)* | must match `API_CRON_SECRET` |
 
-If you set `API_CRON_SECRET`, a good external warmer is a cron calling
-`https://fkoora.site/api/cron/refresh` with the secret (expose
-`api.fkoora.site` and use that URL, or run with the built-in scheduler like
-above - the default - and skip this entirely).
+If you set `API_CRON_SECRET`, an external warmer can still call
+`https://fkoora.site/api/cron/refresh` with the secret - since the split it
+just enqueues a refresh job for the worker (or skip it entirely: the
+worker's scheduler is the default freshness source).
+
+### 6.1 The shared Redis response cache
+
+`REDIS_URL` turns on a cache-aside layer in front of PostgreSQL
+(`scraper/apicache.py`). What it buys you:
+
+* **Database off the hot path** - a cache hit costs ONE Redis GET instead
+  of the endpoint's SQL query chain; a poll with a matching `If-None-Match`
+  answers `304` without even parsing the payload. (ETags alone only saved
+  bandwidth - the server still built every payload before comparing tags.)
+* **Shared + restart-proof** - one cache for every gunicorn worker and
+  every API replica; a deploy or crash does not lose it (unlike a
+  per-process cache).
+* **Never stale** - the worker deletes the affected keys the moment new
+  data lands (listing scrape -> that day's listing keys, detail fetch ->
+  the match key, standings refresh -> the competition keys, profile fetch
+  -> the player key). TTLs are only the safety net for when the worker is
+  down.
+* **Degrade-safe** - Redis unavailable? Every request falls back to plain
+  database reads (one rate-limited warning per 5 min in the log, retry
+  every 60 s). `/api/health` reports
+  `"cache": {"enabled": ..., "connected": ...}`.
+
+Defaults per endpoint (override with `API_CACHE_TTL_*`): day listing today
+15 s / past days 1800 s (finished scores are immutable) / future 300 s;
+match detail live 15 s / finished-with-details 3600 s / upcoming 300 s;
+standings + rounds 60 s; team 300 s; player profile 3600 s. A payload
+carrying `refreshing: true` is always cached for only 15 s (the worker
+also drops the key when the fill lands).
+
+The shipped Redis is a pure cache: 256 MB, `allkeys-lru`, nothing written
+to disk - losing it just means entries get rebuilt from PostgreSQL.
 
 ## 7. Day-2 operations
 
@@ -249,8 +405,8 @@ gunzip -c /backups/fkoora-2026-08-29.sql.gz \
 ```bash
 cd /srv/compose/fkoora && git pull          # or copy the new files
 sh scripts/remove-legacy-seo-files.sh       # only needed when copying/unzipping over an older drop
-docker compose build fkoora-api fkoora-frontend
-docker compose up -d fkoora-api fkoora-frontend
+docker compose build fkoora-api fkoora-worker fkoora-frontend
+docker compose up -d fkoora-api fkoora-worker fkoora-frontend
 ```
 
 > **⚠ Upgrading by unzipping over an older tree?** Zip extraction ADDS and
@@ -321,7 +477,8 @@ bash scripts/smoke_test.sh     # 67 checks: bilingual slugs, 308s, sitemaps,
 **Logs:**
 
 ```bash
-docker compose logs -f fkoora-api           # API + scraper/scheduler
+docker compose logs -f fkoora-worker        # scraper scheduler + job queue
+docker compose logs -f fkoora-api           # read-only API
 docker compose logs -f fkoora-frontend      # Next.js server
 ```
 
@@ -333,16 +490,30 @@ docker compose exec fkoora-api python -m scraper.cli cache-images
 
 ## 8. Troubleshooting
 
-* **`fkoora_frontend` restarts / 500s** - check `FOOTBALL_API_BASE` is exactly
-  `http://fkoora-api:8000` (no trailing slash, no `api.fkoora.site`).
-* **Empty match days** - the scheduler needs a few minutes after the very
+* **`fkoora_frontend` restarts / 500s** - check `FOOTBALL_API_BASE` - it must
+  point at the API container with **no trailing slash** (`http://fkoora_api:9000`
+  or `http://fkoora-api:9000` both resolve on webnet; never `api.fkoora.site`).
+* **Empty match days** - the worker needs a few minutes after the very
   first start; force it with `python -m scraper.cli date <today>` (see §3).
+* **Data stopped updating after the migration** - the API no longer runs a
+  scheduler. `docker compose ps fkoora-worker` must show it Up, and its log
+  should tick every ~60 s (`docker compose logs -f fkoora-worker`). Running
+  the api container alone makes the entrypoint print a loud warning at boot.
 * **`fkoora-api` unhealthy at boot** - wrong `POSTGRES_PASSWORD` (must match
   in both places) or the postgres volume was created with a different
   password; check `docker compose logs fkoora-postgres`.
-* **Port clash** - nothing in the fkoora stack publishes host ports, so the
-  only possible clash is with your other `ports:` mappings (e.g. tauri-portal
-  on 8000 is a *host* port - the API's internal 8000 does not conflict with
-  it).
+* **Redis down / cache degraded** - the API keeps working (plain database
+  reads); `/api/health` shows `"cache": {"connected": false, ...}` and the
+  log has a rate-limited warning. `docker compose logs fkoora-redis` /
+  `docker compose restart fkoora-redis` - the API reconnects within 60 s.
+* **Scores look delayed after adding Redis** - make sure `REDIS_URL` is set
+  on the WORKER container too; without it nothing invalidates the API's
+  cached entries and freshness falls back to the TTLs (15 s for live days,
+  60 s for standings).
+* **Port clash** - only `fkoora-frontend` (`3000:3000`) and
+  `fkoora-postgres` (`127.0.0.1:5433:5432`) publish host ports; the API's
+  internal :9000 and `fkoora-redis` conflict with nothing. If host 3000 is
+  taken, drop the frontend `ports:` mapping and let NPM forward straight to
+  `fkoora-frontend:3000` over webnet.
 * **Standalone testing** of just this stack (own network, loopback ports):
   `cd fkoora && docker compose up -d --build`, then open `http://127.0.0.1:3000`.

@@ -43,8 +43,12 @@ Examples
     # launch the local web view (kooora-style UI, mobile-first)
     python -m scraper.cli serve --port 8765
 
-    # launch the JSON API backend (used by the Next.js frontend)
-    python -m scraper.cli api --port 8000
+    # launch the JSON API backend (used by the Next.js frontend) - READ-ONLY
+    python -m scraper.cli api --port 9000
+
+    # launch the scraper worker (scheduler + API job queue) - the ONLY
+    # process that talks to goal.com. Run it next to the API.
+    python -m scraper.cli worker
 
     # one-shot refresh for an external crontab (listings + live details)
     python -m scraper.cli refresh
@@ -229,7 +233,7 @@ def cmd_players(args) -> None:
       python -m scraper.cli players --missing             # every player in the DB
                                                           # whose profile is missing
     """
-    from .pipeline import enrich_player, enrich_players_for_date, player_ids_from_date
+    from .pipeline import enrich_player, enrich_players_for_date
 
     db = open_db(args)
     try:
@@ -378,9 +382,19 @@ def cmd_serve(args) -> None:
 def cmd_api(args) -> None:
     from . import api as api_module
 
+    if getattr(args, "no_schedule", False):
+        # accepted for compatibility with pre-split scripts/docs - the
+        # scheduler now lives in the worker, this flag is a no-op
+        log.warning("--no-schedule is deprecated: the API no longer scrapes. "
+                    "Freshness is the `worker` command's job now.")
     api_module.run(host=args.host, port=args.port,
-                   db_url=getattr(args, "db", None),
-                   schedule=not args.no_schedule, debug=args.debug)
+                   db_url=getattr(args, "db", None), debug=args.debug)
+
+
+def cmd_worker(args) -> None:
+    from . import worker as worker_module
+
+    worker_module.run(db_url=getattr(args, "db", None))
 
 
 def cmd_refresh(args) -> None:
@@ -417,7 +431,7 @@ def cmd_refresh(args) -> None:
 
 
 def cmd_cache_images(args) -> None:
-    from .api import warm_image_cache
+    from .worker import warm_image_cache
 
     print(f"pre-downloading crests/logos for matches of the last {args.days} days ...")
     ok, fail = warm_image_cache(getattr(args, "db", None), days=args.days,
@@ -624,14 +638,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_serve)
 
     # api -----------------------------------------------------------------
-    p = sub.add_parser("api", help="launch the JSON API backend (frontend data source)")
+    p = sub.add_parser("api", help="launch the read-only JSON API (frontend data source)")
     p.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
-    p.add_argument("--port", type=int, default=9000, help="port (default 8000)")
+    p.add_argument("--port", type=int, default=9000, help="port (default 9000)")
     p.add_argument("--no-schedule", action="store_true",
-                   help="disable the built-in scheduler (use an external crontab + 'refresh')")
+                   help="DEPRECATED no-op: the scheduler moved to the 'worker' command")
     p.add_argument("--debug", action="store_true", help="debug logging")
     p.add_argument("--db", default=None, help="PostgreSQL URL (default: FOOTBALL_DB_URL env)")
     p.set_defaults(func=cmd_api)
+
+    # worker ---------------------------------------------------------------
+    p = sub.add_parser("worker",
+                       help="scraper worker: freshness scheduler + API job queue")
+    p.add_argument("--db", default=None, help="PostgreSQL URL (default: FOOTBALL_DB_URL env)")
+    p.set_defaults(func=cmd_worker)
 
     # refresh ---------------------------------------------------------------
     p = sub.add_parser("refresh",

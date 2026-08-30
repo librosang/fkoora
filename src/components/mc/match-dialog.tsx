@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Dialog,
   DialogClose,
@@ -65,25 +65,48 @@ export function MatchDialog({
   const currentDetail =
     detail && match && detail.matchId === match.matchId ? detail : null;
 
+  const loadEpoch = useRef(0);
+  // stale-while-revalidate chain: a thin detail (detail rows still being
+  // fetched by the scraper worker) carries refreshing=true - quietly
+  // re-fetch a few seconds later, capped, until the full detail lands
+  const refreshChain = useRef(0);
+
   const load = useCallback(async () => {
     if (!match) return;
     setError(false);
+    const epoch = ++loadEpoch.current;
     try {
       const qs = new URLSearchParams();
       if (match.slugAr) qs.set("slugAr", match.slugAr);
       if (match.slugEn) qs.set("slugEn", match.slugEn);
-      const res = await fetch(`/api/match/${match.matchId}?${qs.toString()}`);
+      let res = await fetch(`/api/match/${match.matchId}?${qs.toString()}`);
+      // A 404 can mean the detail rows are simply not in the database yet:
+      // the read-only backend records the gap and the scraper worker fills
+      // it within seconds - retry briefly before showing the error state.
+      for (let attempt = 0; attempt < 2 && res.status === 404; attempt++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        if (epoch !== loadEpoch.current) return; // match changed meanwhile
+        res = await fetch(`/api/match/${match.matchId}?${qs.toString()}`);
+      }
       if (!res.ok) throw new Error("failed");
-      setDetail(await res.json());
+      if (epoch !== loadEpoch.current) return;
+      const data: MatchDetail = await res.json();
+      setDetail(data);
     } catch {
-      setError(true);
+      if (epoch === loadEpoch.current) {
+        setError(true);
+      }
     }
   }, [match]);
 
   // data effect: seed from SSR detail when it belongs to this match (no
   // client fetch needed), otherwise fetch as before
   useEffect(() => {
-    if (!match) return;
+    if (!match) {
+      loadEpoch.current++; // stop any in-flight retry loop
+      return;
+    }
+    refreshChain.current = 0; // fresh re-fetch budget per match
     if (initialDetail && initialDetail.matchId === match.matchId) {
       setDetail(initialDetail);
       return;
@@ -92,6 +115,21 @@ export function MatchDialog({
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [match, load, initialDetail]);
+
+  // stale-while-revalidate: when the backend served a THIN detail (rows
+  // still being fetched by the scraper worker, refreshing=true), quietly
+  // re-fetch a few seconds later so the full detail appears without
+  // reopening the dialog. Chain is capped and resets on fresh data.
+  useEffect(() => {
+    if (!currentDetail?.refreshing) {
+      refreshChain.current = 0;
+      return;
+    }
+    if (refreshChain.current >= 4) return;
+    refreshChain.current += 1;
+    const timer = setTimeout(() => load(), 4000);
+    return () => clearTimeout(timer);
+  }, [currentDetail, load]);
 
   // open-state effect: skipped entirely when the parent controls the dialog
   // (openOverride defined) - it then opens/closes with the prop alone

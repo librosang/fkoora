@@ -178,25 +178,32 @@ backfills (and the `bootstrap` walk) resume where they left off because the
 The Docker image (`Dockerfile.api`) ships with an entrypoint
 (`docker-entrypoint.sh`) that can launch the historical bootstrap
 automatically when the container starts, **in parallel with the API** so the
-API can serve requests immediately.
+API can serve requests immediately. Since the api/scraper split the image has
+one role per container (`SERVICE_ROLE`): `api` (read-only, default),
+`worker` (scraper - runs the bootstrap + scheduler + job queue), or `all`
+(legacy single container).
 
 ```bash
-# Build the image
-docker build -t fkoora-api -f Dockerfile.api .
+# Build the image (used for BOTH roles)
+docker build -t fkoora-backend -f Dockerfile.api .
 
-# Run with bootstrap on start (one-time walk of the last 10 years + next 1 year)
-docker run -d \
-  --name fkoora-api \
-  -p 9000:9000 \
+# read-only API
+docker run -d --name fkoora-api -p 9000:9000 \
+  -e FOOTBALL_DB_URL=postgresql://user:pass@host:5432/football \
+  fkoora-backend
+
+# scraper worker + bootstrap on start (last 10 years + next 1 year)
+docker run -d --name fkoora-worker \
+  -e SERVICE_ROLE=worker \
   -e FOOTBALL_DB_URL=postgresql://user:pass@host:5432/football \
   -e BOOTSTRAP_ON_START=1 \
-  fkoora-api
+  fkoora-backend
 
-# Tail the bootstrap log:
-docker exec -it fkoora-api tail -f /app/bootstrap.log
+# Tail the bootstrap / worker logs:
+docker exec -it fkoora-worker tail -f /app/bootstrap.log
 
-# Stop the bootstrap walk only (API keeps running):
-docker exec fkoora-api pkill -f 'scraper.cli bootstrap'
+# Stop the bootstrap walk only (worker keeps running):
+docker exec fkoora-worker pkill -f 'scraper.cli bootstrap'
 ```
 
 | Env var | Default | Purpose |
@@ -211,23 +218,26 @@ docker exec fkoora-api pkill -f 'scraper.cli bootstrap'
 | `BOOTSTRAP_LOG` | `/app/bootstrap.log` | where the bootstrap writes its log |
 | `BOOTSTRAP_MARKER_PATH` | `/app/.bootstrap_complete` | marker file written on full completion; persist this on a volume if you want the "skip" behaviour to survive image rebuilds |
 | `GUNICORN_BIND` | `0.0.0.0:9000` | gunicorn bind address |
-| `GUNICORN_WORKERS` | `1` | gunicorn workers (keep at 1 — exactly one scrape scheduler is enforced via a Postgres advisory lock) |
+| `GUNICORN_WORKERS` | `1` | gunicorn workers (API role only - no scheduler lives here anymore, scale freely within your DB pool) |
+| `SERVICE_ROLE` | `api` | `api` (read-only) \| `worker` (scraper) \| `all` (legacy both-in-one) |
+| `WORKER_POLL_SEC` | `4` | worker only: refresh_jobs poll cadence |
+| `SCHEDULER_ROLE` | `auto` | worker only: `auto` \| `force` \| `off` (leader election) |
 | `GUNICORN_THREADS` | `8` | gunicorn threads |
 | `GUNICORN_TIMEOUT` | `180` | gunicorn worker timeout (seconds) |
 
-**How the one-time walk works on Docker:**
+**How the one-time walk works on Docker** (worker / all roles):
 
 1. **First start** (`BOOTSTRAP_ON_START=1`, marker missing): the entrypoint
-   launches `python -m scraper.cli bootstrap` in the background, then execs
-   gunicorn as PID 1. The API starts serving immediately while the slow walk
-   runs in the background.
+   launches `python -m scraper.cli bootstrap` in the background, then runs
+   the worker loop (or gunicorn, in the `all` role) as PID 1. The API starts
+   serving immediately while the slow walk runs in the background.
 2. **Container restart mid-walk**: the entrypoint launches the bootstrap
    again. Because every successful date is recorded in `scrape_runs`, the
    walk simply resumes where it left off (already-done dates are skipped).
 3. **Container restart after full completion**: the marker file exists, so
    the entrypoint skips the bootstrap entirely — startup is instant.
 4. **Re-run after changing `BOOTSTRAP_YEARS_BACK`**: delete the marker file
-   inside the container (`docker exec fkoora-api rm /app/.bootstrap_complete`)
+   inside the container (`docker exec fkoora-worker rm /app/.bootstrap_complete`)
    or set `BOOTSTRAP_FORCE=1` and restart the container. The walk will run
    again, but already-done dates still get skipped (only the new range is
    scraped).
@@ -238,26 +248,44 @@ image rebuilds. Without this, a fresh container will re-scan the
 `scrape_runs` table on first start (cheap — ~4000 DB queries, no network),
 find every date already done, and exit in a few seconds.
 
-**Resource notes:** the bootstrap runs in its own Python process and shares
-the configured DB connection pool with the API. The slow profile (2.5 s +
-1.5 s jitter between requests, 3 s between days) keeps goal.com load
-modest. The API's own scheduler runs in a separate thread inside gunicorn
-and focuses on today's live scores; the bootstrap walk focuses on past
-dates plus the future window, so the two rarely collide. If they do,
-upserts are idempotent, so worst case is some duplicate work — never
-duplicate rows.
+**Resource notes:** the bootstrap runs in its own Python process inside the
+worker container. The slow profile (2.5 s + 1.5 s jitter between requests,
+3 s between days) keeps goal.com load modest. The worker's scheduler focuses
+on today's live scores; the bootstrap walk focuses on past dates plus the
+future window, so the two rarely collide. If they do, upserts are
+idempotent, so worst case is some duplicate work — never duplicate rows.
 
 ---
 
-## JSON API backend (serves the Next.js frontend)
+## API server + scraper worker (two processes)
 
-`scraper/api.py` exposes the database as the REST API consumed by the
-Next.js frontend (`../src/`). It also contains the built-in scheduler
-(crons) and the server-side image proxy.
+Since the api/scraper split the backend is TWO processes that share only the
+database:
+
+* **`scraper/api.py` — the read-only API.** Serves the Next.js frontend
+  (`../src/`) straight from PostgreSQL (plus the server-side image proxy).
+  It never scrapes: when a request finds data missing, empty or stale it
+  serves what it has, flags `refreshing: true` and writes a `refresh_jobs`
+  row for the worker. `/api/cron/refresh` also just enqueues a job.
+* **`scraper/worker.py` — the scraper worker.** The ONLY process that talks
+  to goal.com: the freshness scheduler (moved verbatim from the old
+  in-process one) plus the `refresh_jobs` consumer (data-gap requests from
+  the API, picked up within `WORKER_POLL_SEC`, default 4 s). Several
+  workers against one database elect a single leader via a PostgreSQL
+  advisory lock.
+* **`scraper/jobs.py` — the handoff layer** both processes share: the
+  `refresh_jobs` queue + `competition_views` (which leagues users open)
+  tables. The API writes, the worker reads.
+* **`scraper/apicache.py` — the shared response cache** (optional Redis):
+  a cache-aside layer in front of PostgreSQL, enabled by `REDIS_URL` on
+  both processes. The API serves cached responses (one Redis GET per hit,
+  `304` revalidations without any DB work); the worker drops the affected
+  keys the moment fresh data lands, so a hit is never a stale score.
+* **`scraper/imgcache.py`** — the shared image token/disk-cache layer.
 
 ```bash
-python -m scraper.cli api --port 8000        # API + scheduler (default)
-python -m scraper.cli api --no-schedule     # external crontab mode
+python -m scraper.cli api --port 9000       # read-only API
+python -m scraper.cli worker                # scheduler + job queue (goal.com)
 python -m scraper.cli refresh               # one-shot run (crontab body)
 python -m scraper.cli cache-images --days 12  # pre-warm the image disk cache
 ```
@@ -269,18 +297,22 @@ python -m scraper.cli cache-images --days 12  # pre-warm the image disk cache
 | `GET /api/competition/<id>` | competition dialog data: **standings** (position/played/W/D/L/GF/GA/GD/points, last-5 form, zone markers with Arabic names), the season, and the full **round list** with match counts. Cups simply return `standings: null`. |
 | `GET /api/competition/<id>/matches?gameset=<id>` | one round's matches (results + fixtures); omit `gameset` for the **active round**. Matches carry the same shape as `/api/matches` rows, so the frontend's match dialog opens from here too. |
 | `GET /api/img?t=<token>` | image proxy — every crest/logo URL is replaced by an opaque HMAC token (`image_tokens` table) before leaving the server; images are disk-cached in `img_cache/` |
-| `GET /api/cron/refresh?secret=…` | trigger a listing refresh + enrichment run (guard with `API_CRON_SECRET`) |
-| `GET /api/health` | row counts, last scrape runs, scheduler intervals |
+| `GET /api/cron/refresh?secret=…` | enqueue a listing refresh + enrichment run for the worker (guard with `API_CRON_SECRET`) |
+| `GET /api/health` | row counts, last scrape runs, pending job count, cache status (the worker's config: see its log) |
 
-Competition data is fetched **on demand** the first time a competition is
-opened (table page + every round, EN+AR — about three requests) and then
-re-scraped when older than `COMPETITION_TTL_SEC` (default 1800 s).
+Competition data is served straight from the database and re-scraped by the
+worker when older than `COMPETITION_TTL_SEC` (default 1800 s); a first open
+of an unknown league becomes a `comp_discovery` job, a stale one a
+`comp_refresh` job (the response carries `refreshing: true` and the UI
+re-fetches a few seconds later).
 
-The scheduler keeps the database fresh on its own (today every 60 s,
-neighbouring days every 5 min while a match is live or a kickoff is due
-within 12 h — every 30 min otherwise, live match details every 2 min, detail
-backfill every 30 min — all env-configurable). Unknown dates and un-enriched
-matches are fetched **on demand** on first request.
+The worker's scheduler keeps the database fresh on its own (today every
+60 s, neighbouring days every 5 min while a match is live or a kickoff is
+due within 12 h — every 30 min otherwise, live match details every 2 min,
+detail backfill every 30 min — all env-configurable). Unknown dates,
+un-enriched matches, missing player profiles and stale standings are
+requested **by the API** as `refresh_jobs` rows and filled by the worker
+within seconds (rate-limited by `ON_DEMAND_RETRY_SEC`, default 600 s).
 
 ### goal.com load discipline
 
@@ -307,15 +339,23 @@ impossible.
 
 ### Heavy usage / scaling
 
-* **Several API processes are safe now**: the scheduler elects exactly one
-  **leader** through a PostgreSQL advisory lock (`SCHEDULER_ROLE=auto`, the
-  default). Standbys re-check every 15 s and take over if the leader dies —
-  run N gunicorn workers / replicas without multiplying goal.com traffic.
-  `SCHEDULER_ROLE=force` for a dedicated scraper box, `off` to disable.
+* **The API scales freely**: it never scrapes, so run as many gunicorn
+  workers / replicas as your DB pool allows. The goal.com side lives in the
+  worker; several worker processes elect exactly one **leader** through a
+  PostgreSQL advisory lock (`SCHEDULER_ROLE=auto`, the default). Standbys
+  re-check every 15 s and take over if the leader dies.
+  `SCHEDULER_ROLE=force` for a dedicated scraper box, `off` to run the job
+  queue without the freshness ticks.
 * **Conditional responses**: every JSON endpoint emits a strong `ETag` and
   answers `If-None-Match` with `304`. The Next.js proxies forward the
   browser's validator, so while data is unchanged a poll costs a few hundred
   bytes on both hops instead of re-downloading the payload.
+* **Shared response cache** (`REDIS_URL`, optional): every JSON endpoint
+  becomes a cache-aside lookup — a hit costs ONE Redis GET instead of the
+  SQL query chain, shared across all gunicorn workers and API replicas,
+  and the worker invalidates the affected keys after every scrape (see
+  `scraper/apicache.py`). Without Redis the API reads PostgreSQL per
+  request, exactly as before.
 * **Image serving**: disk cache + in-memory LRU (`IMG_MEM_CACHE_MB`, 0 to
   disable) + `ETag`/`304` revalidation, so hot crests are served from RAM
   with zero disk reads and cheap revalidations.
@@ -323,15 +363,20 @@ impossible.
   process; keep the total across processes within PostgreSQL's
   `max_connections`).
 
-Key env vars (all optional): `REFRESH_TODAY_SEC`, `REFRESH_AROUND_SEC`,
-`REFRESH_AROUND_IDLE_SEC`, `AROUND_ACTIVE_LOOKAHEAD_SEC`, `ENRICH_LIVE_SEC`,
-`ENRICH_BACKFILL_SEC`, `LIVE_ENRICH_MAX`, `AR_LISTING_SEC`, `AR_DETAIL_SEC`,
-`ON_DEMAND_RETRY_SEC`, `SCHEDULER_ROLE`, `SCHED_LOCK_KEY`,
-`IMG_MEM_CACHE_MB`, `DB_POOL_MIN`, `DB_POOL_MAX`, plus the competition
-knobs (`COMPETITION_TTL_SEC`, `COMP_REFRESH_SEC`, `COMP_REFRESH_MAX`,
-`COMP_VIEW_TRACK_SEC`, `COMP_EVENT_REFRESH`, `COMP_EVENT_DEBOUNCE_SEC`).
-`GET /api/health` reports the live configuration and which process is the
-scheduler leader.
+Key env vars (all optional). Worker: `REFRESH_TODAY_SEC`,
+`REFRESH_AROUND_SEC`, `REFRESH_AROUND_IDLE_SEC`,
+`AROUND_ACTIVE_LOOKAHEAD_SEC`, `ENRICH_LIVE_SEC`, `ENRICH_BACKFILL_SEC`,
+`LIVE_ENRICH_MAX`, `AR_LISTING_SEC`, `AR_DETAIL_SEC`, `WORKER_POLL_SEC`,
+`MAX_JOB_ATTEMPTS`, `SCHEDULER_ROLE`, plus the competition knobs
+(`COMP_REFRESH_SEC`, `COMP_REFRESH_MAX`, `COMP_VIEW_TRACK_SEC`,
+`COMP_EVENT_REFRESH`, `COMP_EVENT_DEBOUNCE_SEC`). API:
+`COMPETITION_TTL_SEC`, `ON_DEMAND_RETRY_SEC`, `IMG_MEM_CACHE_MB`,
+`DB_POOL_MIN`, `DB_POOL_MAX`, `API_CRON_SECRET`. Shared cache (api AND
+worker): `REDIS_URL` plus the `API_CACHE_TTL_*` per-endpoint TTL overrides
+(defaults in `scraper/apicache.py`: listing 15 s today / 1800 s past /
+300 s future, match 15 s live / 3600 s done / 300 s upcoming, standings
+60 s, team 300 s, player 3600 s). `GET /api/health` reports row counts,
+the last scrape runs, the pending job count and the cache status.
 
 See `../README.md` for the full architecture and the frontend wiring.
 
