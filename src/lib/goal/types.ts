@@ -204,3 +204,102 @@ export interface MatchDetail {
   };
   stats: StatRow[];
 }
+
+// ---------------------------------------------------------------------------
+// team page (click a team -> info + results + fixtures + table rows)
+// ---------------------------------------------------------------------------
+export interface TeamStandingGroup {
+  competition: CompetitionRef;
+  seasonName: string | null;
+  rows: {
+    teamId: string;
+    teamNameEn: string | null;
+    teamNameAr: string | null;
+    /** true for the team this dialog is about (highlight the row) */
+    mine: boolean;
+    position: number;
+    played: number | null;
+    win: number | null;
+    draw: number | null;
+    lose: number | null;
+    goalsFor: number | null;
+    goalsAgainst: number | null;
+    goalDiff: number | null;
+    points: number | null;
+  }[];
+}
+
+export interface TeamDetail {
+  team: TeamRef;
+  results: MatchRow[];
+  fixtures: MatchRow[];
+  standings: TeamStandingGroup[];
+}
+
+// ---------------------------------------------------------------------------
+// player page (click a player -> bio + career + last appearances)
+// ---------------------------------------------------------------------------
+export interface PlayerBio {
+  id: string;
+  nameEn: string | null;
+  nameAr: string | null;
+  fullNameEn: string | null;
+  fullNameAr: string | null;
+  slugEn: string | null;
+  slugAr: string | null;
+  imageUrl: string | null;
+  position: string | null; // GOALKEEPER / DEFENDER / MIDFIELDER / FORWARD
+  shirtNumber: number | null;
+  heightCm: number | null;
+  weightKg: number | null;
+  birthDate: string | null; // ISO YYYY-MM-DD
+  age: number | null;
+  nationalityEn: string | null;
+  nationalityAr: string | null;
+  countryOfBirthEn: string | null;
+  countryOfBirthAr: string | null;
+  placeOfBirthEn: string | null;
+  placeOfBirthAr: string | null;
+  isVerified: boolean;
+  /** false = the profile page was never fetched (bio is just lineup scraps) */
+  profileFetched: boolean;
+}
+
+export interface CareerEntry {
+  teamId: string | null;
+  teamNameEn: string | null;
+  teamNameAr: string | null;
+  seasonName: string | null;
+  competitionId: string | null;
+  competitionNameEn: string | null;
+  competitionNameAr: string | null;
+  appearances: number | null;
+  goals: number | null;
+  assists: number | null;
+  yellowCards: number | null;
+  redCards: number | null;
+  minutesPlayed: number | null;
+  isLoan: boolean;
+}
+
+export interface AppearanceRow {
+  matchId: string;
+  kickoffUtc: string | null;
+  status: string;
+  homeScore: number | null;
+  awayScore: number | null;
+  isStarter: boolean;
+  shirtNumber: number | null;
+  rating: number | null;
+  homeTeam: TeamRef;
+  awayTeam: TeamRef;
+  competitionNameEn: string | null;
+  competitionNameAr: string | null;
+}
+
+export interface PlayerDetail {
+  player: PlayerBio;
+  currentClub: TeamRef | null;
+  career: CareerEntry[];
+  appearances: AppearanceRow[];
+}

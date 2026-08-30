@@ -23,6 +23,8 @@ import type {
   CompetitionMatchesResponse,
   ListingResponse,
   MatchDetail,
+  PlayerDetail,
+  TeamDetail,
 } from "./types";
 
 const API_BASE = process.env.FOOTBALL_API_BASE || "http://127.0.0.1:9000";
@@ -129,6 +131,32 @@ export async function getCompetitionMatches(
   const qs = gamesetId ? `?gameset=${encodeURIComponent(gamesetId)}` : "";
   return getConditional<CompetitionMatchesResponse>(
     `/api/competition/${encodeURIComponent(competitionId)}/matches${qs}`,
+    ifNoneMatch,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// team page (info + recent results + fixtures + table rows)
+// ---------------------------------------------------------------------------
+export async function getTeamDetail(
+  teamId: string,
+  ifNoneMatch?: string | null,
+): Promise<ConditionalResult<TeamDetail>> {
+  return getConditional<TeamDetail>(
+    `/api/team/${encodeURIComponent(teamId)}`,
+    ifNoneMatch,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// player page (bio + career history + last appearances)
+// ---------------------------------------------------------------------------
+export async function getPlayerDetail(
+  playerId: string,
+  ifNoneMatch?: string | null,
+): Promise<ConditionalResult<PlayerDetail>> {
+  return getConditional<PlayerDetail>(
+    `/api/player/${encodeURIComponent(playerId)}`,
     ifNoneMatch,
   );
 }

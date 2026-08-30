@@ -23,6 +23,8 @@ import {
   matchUrlFor,
 } from "@/lib/seo";
 import { MatchDialog } from "./match-dialog";
+import { TeamDialog } from "./team-dialog";
+import { PlayerDialog } from "./player-dialog";
 import { Crest } from "./crest";
 
 interface CompetitionPageClientProps {
@@ -56,6 +58,9 @@ export function CompetitionPageClient({
   const [roundLoading, setRoundLoading] = useState(false);
   const [roundError, setRoundError] = useState(false);
   const [dialogMatch, setDialogMatch] = useState<MatchRow | null>(null);
+  // team / player drill-downs (standings rows, match dialog, lineups)
+  const [teamId, setTeamId] = useState<string | null>(null);
+  const [playerId, setPlayerId] = useState<string | null>(null);
   // true while the browser URL points at a /match/<id> page pushed from this
   // page (closing the dialog pops back with history.back())
   const pushedMatchUrl = useRef(false);
@@ -345,6 +350,7 @@ export function CompetitionPageClient({
                 tables={standings.tables}
                 markers={standings.markers}
                 lang={lang}
+                onOpenTeam={setTeamId}
               />
             ) : (
               <div className="rounded-md border border-[#c3cedd] bg-white px-4 py-8 text-center shadow-sm">
@@ -435,8 +441,29 @@ export function CompetitionPageClient({
 
       {/* ======= match dialog (opened from a round match) ======= */}
       {dialogMatch && (
-        <MatchDialog match={dialogMatch} lang={lang} onClose={closeMatch} />
+        <MatchDialog
+          match={dialogMatch}
+          lang={lang}
+          onClose={closeMatch}
+          onOpenTeam={setTeamId}
+          onOpenPlayer={setPlayerId}
+        />
       )}
+
+      {/* ======= team + player drill-down dialogs ======= */}
+      <TeamDialog
+        teamId={teamId}
+        lang={lang}
+        onClose={() => setTeamId(null)}
+        onOpenMatch={setDialogMatch}
+      />
+      <PlayerDialog
+        playerId={playerId}
+        lang={lang}
+        onClose={() => setPlayerId(null)}
+        onOpenTeam={setTeamId}
+        onOpenMatch={setDialogMatch}
+      />
     </div>
   );
 }
@@ -460,10 +487,12 @@ function StandingsSection({
   tables,
   markers,
   lang,
+  onOpenTeam,
 }: {
   tables: StandingsTable[];
   markers: StandingsMarker[];
   lang: Lang;
+  onOpenTeam?: (teamId: string) => void;
 }) {
   const s = t(lang);
   const markerById = useMemo(
@@ -524,10 +553,15 @@ function StandingsSection({
                           </span>
                         </td>
                         <td className="px-1.5 py-1.5">
-                          <span className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => onOpenTeam?.(r.team.id)}
+                            disabled={!onOpenTeam}
+                            className={`flex items-center gap-1.5 text-start ${onOpenTeam ? "cursor-pointer rounded hover:underline" : ""}`}
+                          >
                             <Crest url={r.team.crestUrl} size={18} />
                             <span className="font-semibold">{nameOf(r.team, lang)}</span>
-                          </span>
+                          </button>
                         </td>
                         <td className="px-1.5 py-1.5 text-center tabular-nums">{r.played ?? "-"}</td>
                         <td className="px-1.5 py-1.5 text-center tabular-nums">{r.win ?? "-"}</td>

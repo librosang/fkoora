@@ -23,6 +23,8 @@ import { DateNav } from "@/components/mc/date-nav";
 import { MatchList } from "@/components/mc/match-list";
 import { MatchDialog } from "@/components/mc/match-dialog";
 import { CompetitionDialog } from "@/components/mc/competition-dialog";
+import { TeamDialog } from "@/components/mc/team-dialog";
+import { PlayerDialog } from "@/components/mc/player-dialog";
 
 // ---------------------------------------------------------------------------
 // auto-refresh cadence: the listing polls at 60s ONLY while live matches are
@@ -69,6 +71,10 @@ export function HomeClient({
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<MatchRow | null>(null);
   const [compSelected, setCompSelected] = useState<CompetitionRef | null>(null);
+  // team / player drill-down dialogs (opened from match rows, the match
+  // dialog's header/lineups, standings tables, ...)
+  const [teamId, setTeamId] = useState<string | null>(null);
+  const [playerId, setPlayerId] = useState<string | null>(null);
 
   // SSR data seeds the list so crawlers (and users) get real content in the
   // first paint; the client then re-fetches to align with the local timezone
@@ -677,6 +683,7 @@ export function HomeClient({
                   lang={lang}
                   onOpen={openMatch}
                   onOpenCompetition={openCompetition}
+                  onOpenTeam={setTeamId}
                 />
               )}
             </>
@@ -697,10 +704,32 @@ export function HomeClient({
         lang={lang}
         onClose={closeCompetition}
         onOpenMatch={openMatch}
+        onOpenTeam={setTeamId}
       />
 
       {/* ======= match detail dialog ======= */}
-      <MatchDialog match={selected} lang={lang} onClose={closeMatch} />
+      <MatchDialog
+        match={selected}
+        lang={lang}
+        onClose={closeMatch}
+        onOpenTeam={setTeamId}
+        onOpenPlayer={setPlayerId}
+      />
+
+      {/* ======= team + player drill-down dialogs ======= */}
+      <TeamDialog
+        teamId={teamId}
+        lang={lang}
+        onClose={() => setTeamId(null)}
+        onOpenMatch={openMatch}
+      />
+      <PlayerDialog
+        playerId={playerId}
+        lang={lang}
+        onClose={() => setPlayerId(null)}
+        onOpenTeam={setTeamId}
+        onOpenMatch={openMatch}
+      />
     </div>
   );
 }

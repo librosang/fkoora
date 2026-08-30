@@ -11,6 +11,8 @@ import {
   matchUrlPair,
 } from "@/lib/seo";
 import { MatchDialog } from "./match-dialog";
+import { TeamDialog } from "./team-dialog";
+import { PlayerDialog } from "./player-dialog";
 import { Crest } from "./crest";
 
 /** Build the MatchRow the dialog needs from a MatchDetail payload. */
@@ -50,6 +52,11 @@ export function MatchPageClient({
   const [detail, setDetail] = useState<MatchDetail | null>(initialDetail);
   const [failed, setFailed] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
+  // team / player drill-downs (match summary header, dialog lineups/events)
+  const [teamId, setTeamId] = useState<string | null>(null);
+  const [playerId, setPlayerId] = useState<string | null>(null);
+  // a stored match opened from the team/player dialogs (full MatchDialog)
+  const [dialogMatch, setDialogMatch] = useState<MatchRow | null>(null);
 
   // keep <html lang/dir> + document.title in sync (SSR already rendered the
   // correct values for the URL's language - the URL itself carries it)
@@ -198,6 +205,7 @@ export function MatchPageClient({
             lang={lang}
             onOpenDetails={() => setDialogOpen(true)}
             onBack={() => router.push("/")}
+            onOpenTeam={setTeamId}
           />
         )}
       </main>
@@ -217,8 +225,31 @@ export function MatchPageClient({
           initialDetail={detail}
           openOverride={dialogOpen}
           onClose={() => setDialogOpen(false)}
+          onOpenTeam={setTeamId}
+          onOpenPlayer={setPlayerId}
         />
       )}
+
+      {/* ======= team + player drill-down dialogs ======= */}
+      <TeamDialog
+        teamId={teamId}
+        lang={lang}
+        onClose={() => setTeamId(null)}
+        onOpenMatch={(m) => {
+          setDialogOpen(false);
+          setDialogMatch(m);
+        }}
+      />
+      <PlayerDialog
+        playerId={playerId}
+        lang={lang}
+        onClose={() => setPlayerId(null)}
+        onOpenTeam={setTeamId}
+        onOpenMatch={(m) => {
+          setDialogOpen(false);
+          setDialogMatch(m);
+        }}
+      />
     </div>
   );
 }
@@ -233,11 +264,13 @@ function MatchSummaryCard({
   lang,
   onOpenDetails,
   onBack,
+  onOpenTeam,
 }: {
   detail: MatchDetail;
   lang: Lang;
   onOpenDetails: () => void;
   onBack: () => void;
+  onOpenTeam?: (teamId: string) => void;
 }) {
   const s = t(lang);
   const hasScore =
@@ -288,10 +321,15 @@ function MatchSummaryCard({
         </p>
 
         <h1 className="mt-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2 text-[15px] font-extrabold leading-snug">
-          <span className="flex flex-col items-center gap-1">
+          <button
+            type="button"
+            onClick={() => detail.homeTeam.id && onOpenTeam?.(detail.homeTeam.id)}
+            disabled={!onOpenTeam}
+            className={`flex flex-col items-center gap-1 rounded-md p-1 transition-colors ${onOpenTeam ? "hover:bg-white/15" : ""}`}
+          >
             <Crest url={detail.homeTeam.crestUrl} size={38} />
-            <span className="text-center">{nameOf(detail.homeTeam, lang)}</span>
-          </span>
+            <span className="text-center underline-offset-2 hover:underline">{nameOf(detail.homeTeam, lang)}</span>
+          </button>
           <span className="flex flex-col items-center gap-1">
             {hasScore ? (
               <span className="flex items-center gap-2 text-3xl tabular-nums tracking-wider">
@@ -309,10 +347,15 @@ function MatchSummaryCard({
               {statusLabel}
             </span>
           </span>
-          <span className="flex flex-col items-center gap-1">
+          <button
+            type="button"
+            onClick={() => detail.awayTeam.id && onOpenTeam?.(detail.awayTeam.id)}
+            disabled={!onOpenTeam}
+            className={`flex flex-col items-center gap-1 rounded-md p-1 transition-colors ${onOpenTeam ? "hover:bg-white/15" : ""}`}
+          >
             <Crest url={detail.awayTeam.crestUrl} size={38} />
-            <span className="text-center">{nameOf(detail.awayTeam, lang)}</span>
-          </span>
+            <span className="text-center underline-offset-2 hover:underline">{nameOf(detail.awayTeam, lang)}</span>
+          </button>
         </h1>
 
         {(when || venue || detail.referee) && (
