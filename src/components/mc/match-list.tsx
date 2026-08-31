@@ -13,9 +13,11 @@ interface MatchListProps {
   lang: Lang;
   onOpen: (m: MatchRow) => void;
   onOpenCompetition: (c: CompetitionRef) => void;
+  /** optional drill-down: click a team name/crest -> team dialog */
+  onOpenTeam?: (teamId: string) => void;
 }
 
-export function MatchList({ groups, lang, onOpen, onOpenCompetition }: MatchListProps) {
+export function MatchList({ groups, lang, onOpen, onOpenCompetition, onOpenTeam }: MatchListProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const s = t(lang);
 
@@ -88,6 +90,7 @@ export function MatchList({ groups, lang, onOpen, onOpenCompetition }: MatchList
                     lang={lang}
                     zebra={i % 2 === 1}
                     onOpen={onOpen}
+                    onOpenTeam={onOpenTeam}
                   />
                 ))}
               </div>
@@ -104,11 +107,13 @@ function MatchRowView({
   lang,
   zebra,
   onOpen,
+  onOpenTeam,
 }: {
   m: MatchRow;
   lang: Lang;
   zebra: boolean;
   onOpen: (m: MatchRow) => void;
+  onOpenTeam?: (teamId: string) => void;
 }) {
   const st = statusDisplay(m, lang);
   const hasScore = m.homeScore !== null && m.awayScore !== null;
@@ -148,6 +153,7 @@ function MatchRowView({
             win={homeWin}
             redCards={m.homeRedCards}
             live={live}
+            onOpenTeam={onOpenTeam}
           />
           <TeamLineMobile
             team={m.awayTeam}
@@ -156,6 +162,7 @@ function MatchRowView({
             win={awayWin}
             redCards={m.awayRedCards}
             live={live}
+            onOpenTeam={onOpenTeam}
           />
           {hasAgg && (
             <div className="self-end text-[10px] leading-none tabular-nums text-[#7d8ea3]">
@@ -172,14 +179,18 @@ function MatchRowView({
         {/* home team: name hugs the score, crest on the outer side of it */}
         <div className="flex min-w-0 items-center justify-end gap-1.5">
           <RedCardChips n={m.homeRedCards} />
-          <span
+          <TeamClickSpan
+            teamId={m.homeTeam.id}
+            onOpenTeam={onOpenTeam}
             className={`truncate text-[14px] ${
               homeWin ? "font-bold text-[#14263a]" : "font-medium text-[#1c2b3a]"
             }`}
           >
             {nameOf(m.homeTeam, lang)}
-          </span>
-          <Crest url={m.homeTeam.crestUrl} size={20} />
+          </TeamClickSpan>
+          <TeamClickSpan teamId={m.homeTeam.id} onOpenTeam={onOpenTeam}>
+            <Crest url={m.homeTeam.crestUrl} size={20} />
+          </TeamClickSpan>
         </div>
 
         {/* score */}
@@ -204,18 +215,64 @@ function MatchRowView({
 
         {/* away team: crest on the outer side of the score, name follows */}
         <div className="flex min-w-0 items-center gap-1.5">
-          <Crest url={m.awayTeam.crestUrl} size={20} />
-          <span
+          <TeamClickSpan teamId={m.awayTeam.id} onOpenTeam={onOpenTeam}>
+            <Crest url={m.awayTeam.crestUrl} size={20} />
+          </TeamClickSpan>
+          <TeamClickSpan
+            teamId={m.awayTeam.id}
+            onOpenTeam={onOpenTeam}
             className={`truncate text-[14px] ${
               awayWin ? "font-bold text-[#14263a]" : "font-medium text-[#1c2b3a]"
             }`}
           >
             {nameOf(m.awayTeam, lang)}
-          </span>
+          </TeamClickSpan>
           <RedCardChips n={m.awayRedCards} />
         </div>
       </div>
     </a>
+  );
+}
+
+/**
+ * Team click target INSIDE the match row's <a>: a span (valid HTML inside an
+ * anchor, unlike a nested button) whose click handler swallows the event so
+ * the row's match-dialog handler never fires. Falls back to plain children
+ * when no team handler is wired.
+ */
+function TeamClickSpan({
+  teamId,
+  onOpenTeam,
+  className,
+  children,
+}: {
+  teamId?: string;
+  onOpenTeam?: (teamId: string) => void;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const enabled = !!(onOpenTeam && teamId);
+  if (!enabled) return <>{children}</>;
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onOpenTeam?.(teamId!);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          e.stopPropagation();
+          onOpenTeam?.(teamId!);
+        }
+      }}
+      className={`cursor-pointer rounded underline-offset-2 hover:underline ${className || ""}`}
+    >
+      {children}
+    </span>
   );
 }
 
@@ -250,6 +307,7 @@ function TeamLineMobile({
   win,
   redCards,
   live,
+  onOpenTeam,
 }: {
   team: TeamRef;
   lang: Lang;
@@ -257,17 +315,22 @@ function TeamLineMobile({
   win: boolean;
   redCards: number;
   live: boolean;
+  onOpenTeam?: (teamId: string) => void;
 }) {
   return (
     <div className="flex min-w-0 items-center gap-1.5">
-      <Crest url={team.crestUrl} size={19} />
-      <span
+      <TeamClickSpan teamId={team.id} onOpenTeam={onOpenTeam}>
+        <Crest url={team.crestUrl} size={19} />
+      </TeamClickSpan>
+      <TeamClickSpan
+        teamId={team.id}
+        onOpenTeam={onOpenTeam}
         className={`min-w-0 truncate text-[14px] ${
           win ? "font-bold text-[#14263a]" : "font-medium text-[#1c2b3a]"
         }`}
       >
         {nameOf(team, lang)}
-      </span>
+      </TeamClickSpan>
       <RedCardChips n={redCards} />
       {score !== null && (
         <span

@@ -828,6 +828,263 @@ def build_competition_matches(conn: psycopg.Connection, comp_id: str,
 
 
 # ---------------------------------------------------------------------------
+# team page (read-only: info + recent results + fixtures + table rows)
+# ---------------------------------------------------------------------------
+_TEAM_MATCH_SQL = """
+SELECT m.id, m.kickoff_utc, m.status, m.period,
+       m.home_score, m.away_score, m.home_agg_score, m.away_agg_score,
+       m.home_red_cards, m.away_red_cards,
+       m.round_name, m.gameset_name, m.gameset_name_ar,
+       m.slug_en, m.slug_ar,
+       v.name_en AS venue_en, v.name_ar AS venue_ar,
+       c.id AS c_id, c.name_en AS c_name_en, c.name_ar AS c_name_ar,
+       c.area_name_en AS c_area_en, c.area_name_ar AS c_area_ar, c.area_code AS c_area_code,
+       c.image_url AS c_image,
+       th.id AS h_id, th.name_en AS h_name_en, th.name_ar AS h_name_ar,
+       th.short_name_en AS h_short, th.code AS h_code, th.crest_url AS h_crest,
+       ta.id AS a_id, ta.name_en AS a_name_en, ta.name_ar AS a_name_ar,
+       ta.short_name_en AS a_short, ta.code AS a_code, ta.crest_url AS a_crest
+FROM matches m
+JOIN competitions c ON c.id = m.competition_id
+JOIN teams th ON th.id = m.home_team_id
+JOIN teams ta ON ta.id = m.away_team_id
+LEFT JOIN venues v ON v.id = m.venue_id
+WHERE (m.home_team_id = %(tid)s OR m.away_team_id = %(tid)s)
+  AND {cond}
+ORDER BY m.kickoff_utc {dir}, m.id
+LIMIT %(limit)s
+"""
+
+_FINISHED_STATUSES = ("RESULT", "AET", "PEN")
+
+
+def build_team(conn: psycopg.Connection, team_id: str) -> Optional[Dict[str, Any]]:
+    """Everything the team dialog needs, straight from the DB (no scraping).
+
+    Results/fixtures come from stored matches; standings groups are the
+    competitions where the team currently appears in the table (the most
+    recently refreshed season per competition wins).
+    """
+    team = conn.execute(
+        """SELECT id, name_en, name_ar, short_name_en, code, crest_url
+           FROM teams WHERE id = %s""", (team_id,),
+    ).fetchone()
+    if team is None:
+        return None
+
+    finished = "('" + "','".join(_FINISHED_STATUSES) + "')"
+    results = conn.execute(
+        _TEAM_MATCH_SQL.format(
+            cond=f"m.status IN {finished}", dir="DESC"),
+        {"tid": team_id, "limit": 10},
+    ).fetchall()
+    fixtures = conn.execute(
+        _TEAM_MATCH_SQL.format(cond="m.status IN ('FIXTURE','POSTPONED')", dir="ASC"),
+        {"tid": team_id, "limit": 10},
+    ).fetchall()
+
+    comp_json_cache: Dict[str, Dict[str, Any]] = {}
+
+    def _to_match_row(r) -> Dict[str, Any]:
+        cid = r["c_id"]
+        if cid not in comp_json_cache:
+            comp_json_cache[cid] = _competition_json(
+                conn, cid, r["c_name_en"], r["c_name_ar"],
+                r["c_area_en"], r["c_area_ar"], r["c_area_code"], r["c_image"],
+            )
+        return _match_row(conn, r, comp_json_cache[cid])
+
+    # standings: competitions where the team currently appears in a table.
+    # Keep the freshest season per competition, then fetch that season's FULL
+    # table (team name on every row) so the UI can render a real mini table
+    # with the team's own row highlighted.
+    seeds = conn.execute(
+        """SELECT competition_id, season_id, MAX(updated_at) AS updated_at
+           FROM standings WHERE team_id = %s
+           GROUP BY competition_id, season_id
+           ORDER BY MAX(updated_at) DESC""", (team_id,),
+    ).fetchall()
+    freshest: Dict[str, str] = {}
+    for r in seeds:
+        cid = r["competition_id"]
+        if cid not in freshest:                      # first = most recent
+            freshest[cid] = r["season_id"] or ""
+    standings: List[Dict[str, Any]] = []
+    comp_json_cache2: Dict[str, Dict[str, Any]] = {}
+    for cid, season_id in freshest.items():
+        c = conn.execute(
+            """SELECT id, name_en, name_ar, area_name_en, area_name_ar,
+                      area_code, image_url
+               FROM competitions WHERE id = %s""", (cid,),
+        ).fetchone()
+        if c is None:
+            continue
+        if cid not in comp_json_cache2:
+            comp_json_cache2[cid] = _competition_json(
+                conn, cid, c["name_en"], c["name_ar"],
+                c["area_name_en"], c["area_name_ar"], c["area_code"], c["image_url"],
+            )
+        rows = conn.execute(
+            """SELECT s.position, s.played, s.win, s.draw, s.lose,
+                      s.goals_for, s.goals_against, s.goal_diff, s.points,
+                      t.id AS team_id, t.name_en AS team_name_en,
+                      t.name_ar AS team_name_ar
+               FROM standings s JOIN teams t ON t.id = s.team_id
+               WHERE s.competition_id = %s AND COALESCE(s.season_id, '') = %s
+               ORDER BY s.position""",
+            (cid, season_id),
+        ).fetchall()
+        season_name = None
+        if season_id:
+            sr = conn.execute(
+                "SELECT name FROM seasons WHERE id = %s", (season_id,)
+            ).fetchone()
+            season_name = sr["name"] if sr else None
+        standings.append({
+            "competition": comp_json_cache2[cid],
+            "seasonName": season_name,
+            "rows": [{
+                "teamId": r["team_id"],
+                "teamNameEn": r["team_name_en"],
+                "teamNameAr": r["team_name_ar"],
+                "mine": r["team_id"] == team_id,
+                "position": r["position"],
+                "played": r["played"], "win": r["win"], "draw": r["draw"],
+                "lose": r["lose"], "goalsFor": r["goals_for"],
+                "goalsAgainst": r["goals_against"], "goalDiff": r["goal_diff"],
+                "points": r["points"],
+            } for r in rows],
+        })
+    standings.sort(key=lambda g: g["rows"][0]["position"] if g["rows"] else 99)
+
+    return {
+        "team": _team_ref(conn, team),
+        "results": [_to_match_row(r) for r in results],
+        "fixtures": [_to_match_row(r) for r in fixtures],
+        "standings": standings,
+    }
+
+
+# ---------------------------------------------------------------------------
+# player page (read-only: bio + career history + recent appearances)
+# ---------------------------------------------------------------------------
+def build_player(conn: psycopg.Connection, player_id: str) -> Optional[Dict[str, Any]]:
+    """Player bio, career history and last appearances (no scraping)."""
+    p = conn.execute("SELECT * FROM players WHERE id = %s", (player_id,)).fetchone()
+    if p is None:
+        return None
+
+    club = None
+    if p["current_club_id"]:
+        crow = conn.execute(
+            """SELECT id, name_en, name_ar, short_name_en, code, crest_url
+               FROM teams WHERE id = %s""", (p["current_club_id"],),
+        ).fetchone()
+        club = _team_ref(conn, crow)
+
+    career = conn.execute(
+        """SELECT team_id, team_name_en, team_name_ar, season_name,
+                  competition_id, competition_name_en, competition_name_ar,
+                  appearances, goals, assists, yellow_cards, red_cards,
+                  minutes_played, is_loan, sort_order
+           FROM player_career_entries WHERE player_id = %s
+           ORDER BY sort_order NULLS LAST, season_name DESC""",
+        (player_id,),
+    ).fetchall()
+
+    apps = conn.execute(
+        """SELECT m.id, m.kickoff_utc, m.status, m.home_score, m.away_score,
+                  l.is_starter, l.shirt_number, l.rating,
+                  th.id AS h_id, th.name_en AS h_name_en, th.name_ar AS h_name_ar,
+                  th.short_name_en AS h_short, th.code AS h_code, th.crest_url AS h_crest,
+                  ta.id AS a_id, ta.name_en AS a_name_en, ta.name_ar AS a_name_ar,
+                  ta.short_name_en AS a_short, ta.code AS a_code, ta.crest_url AS a_crest,
+                  c.name_en AS c_name_en, c.name_ar AS c_name_ar
+           FROM lineups l
+           JOIN matches m ON m.id = l.match_id
+           JOIN teams th ON th.id = m.home_team_id
+           JOIN teams ta ON ta.id = m.away_team_id
+           JOIN competitions c ON c.id = m.competition_id
+           WHERE l.player_id = %s
+           ORDER BY m.kickoff_utc DESC LIMIT 8""", (player_id,),
+    ).fetchall()
+
+    def _mini_team(prefix: str, r) -> Dict[str, Any]:
+        return {
+            "id": r[f"{prefix}_id"],
+            "nameEn": r[f"{prefix}_name_en"],
+            "nameAr": r[f"{prefix}_name_ar"],
+            "shortNameEn": r[f"{prefix}_short"],
+            "code": r[f"{prefix}_code"],
+            "crestUrl": img_path(conn, r[f"{prefix}_crest"]),
+        }
+
+    appearances = [{
+        "matchId": r["id"],
+        "kickoffUtc": r["kickoff_utc"],
+        "status": r["status"],
+        "homeScore": r["home_score"],
+        "awayScore": r["away_score"],
+        "isStarter": bool(r["is_starter"]),
+        "shirtNumber": r["shirt_number"],
+        "rating": _norm_num(r["rating"]) if r["rating"] is not None else None,
+        "homeTeam": _mini_team("h", r),
+        "awayTeam": _mini_team("a", r),
+        "competitionNameEn": r["c_name_en"],
+        "competitionNameAr": r["c_name_ar"],
+    } for r in apps]
+
+    def _txt(v: Any) -> Optional[str]:
+        v = (v or "").strip()
+        return v or None
+
+    return {
+        "player": {
+            "id": p["id"],
+            "nameEn": p["name_en"],
+            "nameAr": p["name_ar"],
+            "fullNameEn": p["full_name_en"],
+            "fullNameAr": p["full_name_ar"],
+            "slugEn": p["slug_en"],
+            "slugAr": p["slug_ar"],
+            "imageUrl": img_path(conn, p["image_url"]),
+            "position": p["position"],
+            "shirtNumber": p["shirt_number"],
+            "heightCm": p["height_cm"],
+            "weightKg": p["weight_kg"],
+            "birthDate": p["birth_date"],
+            "age": p["age"],
+            "nationalityEn": _txt(p["nationality_en"]),
+            "nationalityAr": _txt(p["nationality_ar"]),
+            "countryOfBirthEn": _txt(p["country_of_birth_en"]),
+            "countryOfBirthAr": _txt(p["country_of_birth_ar"]),
+            "placeOfBirthEn": _txt(p["place_of_birth_en"]),
+            "placeOfBirthAr": _txt(p["place_of_birth_ar"]),
+            "isVerified": bool(p["is_verified"]),
+            "profileFetched": p["profile_fetched_at"] is not None,
+        },
+        "currentClub": club,
+        "career": [{
+            "teamId": r["team_id"],
+            "teamNameEn": r["team_name_en"],
+            "teamNameAr": r["team_name_ar"],
+            "seasonName": r["season_name"],
+            "competitionId": r["competition_id"],
+            "competitionNameEn": r["competition_name_en"],
+            "competitionNameAr": r["competition_name_ar"],
+            "appearances": r["appearances"],
+            "goals": r["goals"],
+            "assists": r["assists"],
+            "yellowCards": r["yellow_cards"],
+            "redCards": r["red_cards"],
+            "minutesPlayed": r["minutes_played"],
+            "isLoan": bool(r["is_loan"]),
+        } for r in career],
+        "appearances": appearances,
+    }
+
+
+# ---------------------------------------------------------------------------
 # scraping glue (on-demand + scheduled) - the ONLY place the app hits goal.com
 # ---------------------------------------------------------------------------
 _scrape_lock = threading.Lock()
@@ -1606,6 +1863,31 @@ def create_app(db_url: Optional[str] = None) -> Flask:
                 _kick_competition_refresh(comp_id)
                 return _etag_response({**payload, "refreshing": True})
 
+        return _etag_response(payload)
+
+    # ---- GET /api/team/<id> -------------------------------------------------
+    # Read-only drill-down: team info + last results + upcoming fixtures +
+    # table rows. No goal.com traffic - data lands via the scraper walks.
+    @app.get("/api/team/<team_id>")
+    def api_team(team_id: str):
+        if not re.match(r"^[A-Za-z0-9_-]{4,64}$", team_id):
+            return jsonify({"error": "invalid team id"}), 400
+        conn = get_conn()
+        payload = build_team(conn, team_id)
+        if payload is None:
+            return jsonify({"error": "team not found"}), 404
+        return _etag_response(payload)
+
+    # ---- GET /api/player/<id> ----------------------------------------------
+    # Read-only drill-down: bio + career history + last appearances.
+    @app.get("/api/player/<player_id>")
+    def api_player(player_id: str):
+        if not re.match(r"^[A-Za-z0-9_-]{4,64}$", player_id):
+            return jsonify({"error": "invalid player id"}), 400
+        conn = get_conn()
+        payload = build_player(conn, player_id)
+        if payload is None:
+            return jsonify({"error": "player not found"}), 404
         return _etag_response(payload)
 
     # ---- GET /api/img?t=... ------------------------------------------------

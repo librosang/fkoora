@@ -96,6 +96,31 @@ export interface Strings {
   drawForm: string;
   loseForm: string;
   seasonLabel: string;
+  // team dialog
+  teamResults: string;
+  teamFixtures: string;
+  noTeamMatches: string;
+  // player dialog
+  playerCareer: string;
+  playerRecent: string;
+  playerNoProfile: string;
+  positionLabel: string;
+  nationalityLabel: string;
+  bornLabel: string;
+  ageShort: string;
+  heightLabel: string;
+  weightLabel: string;
+  currentClubLabel: string;
+  birthplaceLabel: string;
+  appsCol: string;
+  goalsCol: string;
+  assistsCol: string;
+  seasonCol: string;
+  clubCol: string;
+  compCol: string;
+  starterShort: string;
+  benchShort: string;
+  playerProfile: string;
 }
 
 const AR: Strings = {
@@ -191,6 +216,31 @@ const AR: Strings = {
   drawForm: "ت",
   loseForm: "خ",
   seasonLabel: "الموسم",
+  // team dialog
+  teamResults: "آخر النتائج",
+  teamFixtures: "المباريات القادمة",
+  noTeamMatches: "لا توجد مباريات مسجلة حالياً",
+  // player dialog
+  playerCareer: "المسيرة",
+  playerRecent: "آخر المباريات",
+  playerNoProfile: "لم يتم جلب ملف اللاعب بعد - ستتوفر التفاصيل بعد تحديث البيانات",
+  positionLabel: "المركز",
+  nationalityLabel: "الجنسية",
+  bornLabel: "الميلاد",
+  ageShort: "سنة",
+  heightLabel: "الطول",
+  weightLabel: "الوزن",
+  currentClubLabel: "النادي الحالي",
+  birthplaceLabel: "مكان الميلاد",
+  appsCol: "لعب",
+  goalsCol: "أهداف",
+  assistsCol: "صناعة",
+  seasonCol: "الموسم",
+  clubCol: "النادي",
+  compCol: "البطولة",
+  starterShort: "أساسي",
+  benchShort: "بديل",
+  playerProfile: "ملف اللاعب",
 };
 
 const EN: Strings = {
@@ -286,6 +336,31 @@ const EN: Strings = {
   drawForm: "D",
   loseForm: "L",
   seasonLabel: "Season",
+  // team dialog
+  teamResults: "Latest results",
+  teamFixtures: "Upcoming fixtures",
+  noTeamMatches: "No matches stored yet",
+  // player dialog
+  playerCareer: "Career history",
+  playerRecent: "Recent matches",
+  playerNoProfile: "Player profile not fetched yet - details will appear once the data is refreshed",
+  positionLabel: "Position",
+  nationalityLabel: "Nationality",
+  bornLabel: "Born",
+  ageShort: "yrs",
+  heightLabel: "Height",
+  weightLabel: "Weight",
+  currentClubLabel: "Current club",
+  birthplaceLabel: "Place of birth",
+  appsCol: "Apps",
+  goalsCol: "Goals",
+  assistsCol: "Assists",
+  seasonCol: "Season",
+  clubCol: "Club",
+  compCol: "Competition",
+  starterShort: "XI",
+  benchShort: "Sub",
+  playerProfile: "Player profile",
 };
 
 export const STRINGS: Record<Lang, Strings> = { ar: AR, en: EN };

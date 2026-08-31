@@ -28,6 +28,8 @@ interface CompetitionDialogProps {
   onClose: () => void;
   /** open the match dialog for a match inside the selected round */
   onOpenMatch: (m: MatchRow) => void;
+  /** optional drill-down: click a standings team -> team dialog */
+  onOpenTeam?: (teamId: string) => void;
 }
 
 /**
@@ -39,6 +41,7 @@ export function CompetitionDialog({
   lang,
   onClose,
   onOpenMatch,
+  onOpenTeam,
 }: CompetitionDialogProps) {
   const s = t(lang);
   const [open, setOpen] = useState(false);
@@ -275,6 +278,7 @@ export function CompetitionDialog({
                         markers={currentInfo.standings.markers}
                         lang={lang}
                         strings={s}
+                        onOpenTeam={onOpenTeam}
                       />
                     </TabsContent>
                   )}
@@ -319,11 +323,13 @@ function StandingsView({
   markers,
   lang,
   strings: s,
+  onOpenTeam,
 }: {
   tables: StandingsTable[];
   markers: StandingsMarker[];
   lang: Lang;
   strings: ReturnType<typeof t>;
+  onOpenTeam?: (teamId: string) => void;
 }) {
   const markerById = useMemo(
     () => Object.fromEntries(markers.map((m) => [m.id, m])),
@@ -377,12 +383,17 @@ function StandingsView({
                         </span>
                       </td>
                       <td className="px-2 py-1.5">
-                        <span className="flex min-w-0 items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => onOpenTeam?.(r.team.id)}
+                          disabled={!onOpenTeam}
+                          className={`flex min-w-0 items-center gap-1.5 text-start ${onOpenTeam ? "cursor-pointer rounded hover:underline" : ""}`}
+                        >
                           <Crest url={r.team.crestUrl} size={17} />
                           <span className="truncate font-semibold text-[#1c2b3a]">
                             {nameOf(r.team, lang)}
                           </span>
-                        </span>
+                        </button>
                       </td>
                       <td className="px-1 py-1.5 text-center tabular-nums text-[#33455e]">{r.played}</td>
                       <td className="hidden px-1 py-1.5 text-center tabular-nums text-[#33455e] md:table-cell">{r.win}</td>

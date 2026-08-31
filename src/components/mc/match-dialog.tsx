@@ -31,6 +31,9 @@ interface MatchDialogProps {
   /** when defined, the dialog's open state is fully controlled by the parent
    *  (match page summary card); undefined = self-managed (listing behavior) */
   openOverride?: boolean;
+  /** optional drill-downs: click a team name/crest or a player name */
+  onOpenTeam?: (teamId: string) => void;
+  onOpenPlayer?: (playerId: string) => void;
 }
 
 export function MatchDialog({
@@ -39,6 +42,8 @@ export function MatchDialog({
   onClose,
   initialDetail,
   openOverride,
+  onOpenTeam,
+  onOpenPlayer,
 }: MatchDialogProps) {
   const s = t(lang);
   const [open, setOpen] = useState(false);
@@ -147,10 +152,7 @@ export function MatchDialog({
               {/* score row */}
               <div className="mt-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
                 <div className="flex flex-col items-center gap-1">
-                  <Crest url={home?.crestUrl} size={34} />
-                  <span className="text-center text-[13px] font-bold leading-tight">
-                    {nameOf(home || {}, lang)}
-                  </span>
+                  <TeamButton team={home} lang={lang} onOpenTeam={onOpenTeam} />
                 </div>
 
                 <div className="flex flex-col items-center gap-1">
@@ -196,10 +198,7 @@ export function MatchDialog({
                 </div>
 
                 <div className="flex flex-col items-center gap-1">
-                  <Crest url={away?.crestUrl} size={34} />
-                  <span className="text-center text-[13px] font-bold leading-tight">
-                    {nameOf(away || {}, lang)}
-                  </span>
+                  <TeamButton team={away} lang={lang} onOpenTeam={onOpenTeam} />
                 </div>
               </div>
 
@@ -288,7 +287,7 @@ export function MatchDialog({
                         {visibleEvents.map((ev, i) => (
                           <div key={i} className="grid grid-cols-[1fr_52px_1fr] items-center">
                             {ev.teamSide === "home" ? (
-                              <EventChip ev={ev} lang={lang} align="end" />
+                              <EventChip ev={ev} lang={lang} align="end" onOpenPlayer={onOpenPlayer} />
                             ) : (
                               <span />
                             )}
@@ -296,7 +295,7 @@ export function MatchDialog({
                               {minuteLabel(ev)}
                             </div>
                             {ev.teamSide === "away" ? (
-                              <EventChip ev={ev} lang={lang} align="start" />
+                              <EventChip ev={ev} lang={lang} align="start" onOpenPlayer={onOpenPlayer} />
                             ) : (
                               <span />
                             )}
@@ -309,8 +308,8 @@ export function MatchDialog({
                   {/* ---------- lineups ---------- */}
                   <TabsContent value="lineups" className="mt-3">
                     <div className="grid gap-4 md:grid-cols-2">
-                      <LineupColumn team={currentDetail.lineups.home} lang={lang} />
-                      <LineupColumn team={currentDetail.lineups.away} lang={lang} />
+                      <LineupColumn team={currentDetail.lineups.home} lang={lang} onOpenPlayer={onOpenPlayer} />
+                      <LineupColumn team={currentDetail.lineups.away} lang={lang} onOpenPlayer={onOpenPlayer} />
                     </div>
                   </TabsContent>
 
@@ -371,16 +370,56 @@ export function MatchDialog({
 }
 
 // ---------------------------------------------------------------------------
+// clickable team (crest + name) used in the dialog header
+// ---------------------------------------------------------------------------
+function TeamButton({
+  team,
+  lang,
+  onOpenTeam,
+}: {
+  team?: MatchDetail["homeTeam"];
+  lang: Lang;
+  onOpenTeam?: (teamId: string) => void;
+}) {
+  const enabled = !!(onOpenTeam && team?.id);
+  if (!enabled) {
+    return (
+      <>
+        <Crest url={team?.crestUrl} size={34} />
+        <span className="text-center text-[13px] font-bold leading-tight">
+          {nameOf(team || {}, lang)}
+        </span>
+      </>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => onOpenTeam?.(team!.id)}
+      title={nameOf(team || {}, lang)}
+      className="flex flex-col items-center gap-1 rounded-md p-1 transition-colors hover:bg-white/15 focus:outline-none"
+    >
+      <Crest url={team?.crestUrl} size={34} />
+      <span className="text-center text-[13px] font-bold leading-tight underline-offset-2 hover:underline">
+        {nameOf(team || {}, lang)}
+      </span>
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // event chip (icon + player + related player + VAR outcome)
 // ---------------------------------------------------------------------------
 function EventChip({
   ev,
   lang,
   align,
+  onOpenPlayer,
 }: {
   ev: MatchEvent;
   lang: Lang;
   align: "start" | "end";
+  onOpenPlayer?: (playerId: string) => void;
 }) {
   const s = t(lang);
   const player = nameOf(ev.player || {}, lang);
@@ -444,6 +483,7 @@ function EventChip({
       varCancelled={varCancelled}
       missed={missed}
       scored={scored}
+      onOpenPlayer={onOpenPlayer}
     />
   );
 
@@ -479,6 +519,7 @@ function EventLabel({
   varCancelled,
   missed,
   scored,
+  onOpenPlayer,
 }: {
   ev: MatchEvent;
   player: string;
@@ -490,6 +531,7 @@ function EventLabel({
   varCancelled: boolean;
   missed: boolean;
   scored: boolean;
+  onOpenPlayer?: (playerId: string) => void;
 }) {
   const rtl = lang === "ar";
   // direction-safe: keep chips LTR-ordered internally but text uses page lang
@@ -501,16 +543,29 @@ function EventLabel({
       {/* main person(s): substitutions show the incoming + outgoing pair */}
       {ev.eventType === "SUBSTITUTION" && related ? (
         <span className="inline-flex items-center gap-x-1.5">
-          <span className="font-semibold text-[#1d7a1d]">↑ {related}</span>
+          <PlayerName
+            name={related}
+            id={ev.relatedPlayer?.id || null}
+            className="font-semibold text-[#1d7a1d]"
+            prefix={"\u2191 "}
+            onOpenPlayer={onOpenPlayer}
+          />
           <span className="text-[#93a1b3]">·</span>
-          <span className="font-semibold text-[#b3392f]">↓ {player}</span>
+          <PlayerName
+            name={player}
+            id={ev.player?.id || null}
+            className="font-semibold text-[#b3392f]"
+            prefix={"\u2193 "}
+            onOpenPlayer={onOpenPlayer}
+          />
         </span>
       ) : (
-        <span
+        <PlayerName
+          name={player}
+          id={ev.player?.id || null}
           className={`font-semibold ${varLabel && varCancelled ? "text-[#8a2f28]" : "text-[#1c2b3a]"}`}
-        >
-          {player}
-        </span>
+          onOpenPlayer={onOpenPlayer}
+        />
       )}
 
       {/* VAR review outcome (e.g. disallowed goal) */}
@@ -547,9 +602,57 @@ function EventLabel({
 }
 
 // ---------------------------------------------------------------------------
+// clickable player name (events + lineups)
+// ---------------------------------------------------------------------------
+function PlayerName({
+  name,
+  id,
+  className,
+  prefix,
+  onOpenPlayer,
+}: {
+  name: string;
+  id?: string | null;
+  className?: string;
+  prefix?: string;
+  onOpenPlayer?: (playerId: string) => void;
+}) {
+  if (onOpenPlayer && id) {
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenPlayer(id);
+        }}
+        title={name}
+        className={`rounded text-start underline-offset-2 hover:underline focus:outline-none ${className || ""}`}
+      >
+        {prefix}
+        {name}
+      </button>
+    );
+  }
+  return (
+    <span className={className}>
+      {prefix}
+      {name}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // lineup column
 // ---------------------------------------------------------------------------
-function LineupColumn({ team, lang }: { team?: LineupTeam; lang: Lang }) {
+function LineupColumn({
+  team,
+  lang,
+  onOpenPlayer,
+}: {
+  team?: LineupTeam;
+  lang: Lang;
+  onOpenPlayer?: (playerId: string) => void;
+}) {
   const s = t(lang);
   if (!team || team.entries.length === 0) {
     return (
@@ -574,7 +677,11 @@ function LineupColumn({ team, lang }: { team?: LineupTeam; lang: Lang }) {
         {entry.shirtNumber ?? ""}
       </span>
       <span className={`min-w-0 flex-1 truncate font-medium ${dim ? "" : "font-semibold"}`}>
-        {nameOf(entry.person, lang)}
+        <PlayerName
+          name={nameOf(entry.person, lang)}
+          id={entry.person?.id || null}
+          onOpenPlayer={onOpenPlayer}
+        />
         {entry.isCaptain && (
           <span className="ms-1 rounded bg-[#e8eff9] px-1 text-[10px] font-bold text-[#17457f]">
             {s.captain}
