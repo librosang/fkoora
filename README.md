@@ -3,36 +3,25 @@
 A complete pipeline that **scrapes goal.com (English + Arabic) into our own
 PostgreSQL database** and serves it to a bilingual (EN/AR, RTL-aware) web
 frontend. The frontend never scrapes anything — every row it renders comes out
-of PostgreSQL through our Python API. Live score changes reach the browser
-through **Server-Sent Events** (never per-browser scraping, never per-browser
-provider calls).
+of PostgreSQL through our Python API.
 
 ```
 goal.com EN + AR ──scrape──▶  PostgreSQL (FOOTBALL_DB_URL) ◀── SQL reads
         (rate-limited,            idempotent                      │
-         retries,                 upserts, native                ▼
-         ADAPTIVE polling         TIMESTAMPTZ/DATE     Flask API  :8000   (scraper/api.py)
-         by live/upcoming/        + data_version        /api/matches      day listings (local-tz correct)
-         idle state)              change counters       /api/matches/live live list (Redis hot cache)
-                                                       /api/match/<id>   events·lineups·stats (VAR included)
-                                                       /api/competition/<id>          standings + round list
-                                                       /api/competition/<id>/matches one round's results/fixtures
-                                                       /api/events/live SSE stream (Redis Pub/Sub fan-out)
-                                                       /api/img?t=…      image proxy (URLs stay hidden)
-                                                       /api/cron/refresh scraping trigger
-                                                      │                ▲
-                                        commit ──▶ Redis ◀── publish      │
-                                        (hot cache +         (worker,     │
-                                         invalidation +       only after   │
-                                         Pub/Sub envelopes)   COMMIT)      │
-                                                      ▼                     │
-                                      SSE fan-out (one Redis subscription   │
-                                      per process → every browser) ─────────┘
+         retries)                 upserts                        ▼
+                                             Flask API  :8000   (scraper/api.py)
+                                             /api/matches      day listings (local-tz correct)
+                                             /api/match/<id>   events·lineups·stats (VAR included)
+                                             /api/competition/<id>          standings + round list
+                                             /api/competition/<id>/matches one round's results/fixtures
+                                             /api/img?t=…      image proxy (URLs stay hidden)
+                                             /api/cron/refresh scraping trigger
+                                             + built-in scheduler (crons)
+                                                      │
                                                       ▼  HTTP (server-side)
                                       Next.js frontend :3000  (src/)
                                       pure consumer — /api/* are thin proxies
-                                      bilingual UI, RTL/LTR, live scores via
-                                      EventSource + polling fallback,
+                                      bilingual UI, RTL/LTR, live scores,
                                       VAR-annotated events, standings tables,
                                       round navigator, kooora-classic theme
 ```
@@ -45,9 +34,8 @@ goal.com EN + AR ──scrape──▶  PostgreSQL (FOOTBALL_DB_URL) ◀── S
 | `src/` | Next.js frontend: `app/` (pages + `/api` proxies), `components/mc/` (UI), `lib/goal/service.ts` (API client), `lib/i18n.ts` (EN/AR strings) |
 | `examples/queries.sql` | ready-to-run analytical queries (psql) |
 | `scripts/daemon.py` | double-fork daemon launcher (keeps background processes alive) |
-| `Dockerfile.api` / `Dockerfile.frontend` / `docker-healthcheck.py` | production images: one shared backend image (gunicorn API **or** scraper worker **or** one-shot migration, picked by `SERVICE_ROLE`; role-aware healthcheck) and standalone Next.js (bun build → node run) |
-| `docker-compose.yml` | the standalone six-service stack (PostgreSQL + Redis + one-shot migrate + API + worker + frontend) - `docker compose up -d --build` from the repo root |
-| `docker-compose.fkoora-full.yml` | production variant merged into an existing homelab compose (NPM, MariaDB, ... - build context `./fkoora`) |
+| `Dockerfile` / `Dockerfile.frontend` | production images: gunicorn API (python:3.12-slim) and standalone Next.js (bun build → node run) |
+| `docker-compose.yml` | the three-service stack (PostgreSQL + API + frontend) for isolated testing |
 | `DEPLOY.md` | production deployment behind Nginx Proxy Manager / Cloudflare Tunnel |
 
 ## Run it (local development)
@@ -104,40 +92,20 @@ it on first request — then again whenever older than `COMPETITION_TTL_SEC`
 
 ## Deploy with Docker
 
-The whole stack runs as six containers from two images — one shared backend
-image and the frontend image:
-
-| Service | Role |
-|---|---|
-| `fkoora-postgres` | source of truth (data in `./postgres-data`) |
-| `fkoora-redis` | response cache + live layer (volatile-lru, nothing persisted) |
-| `fkoora-migrate` | ONE-SHOT init: idempotent schema + TEXT→TIMESTAMPTZ conversion, exits 0 |
-| `fkoora-api` | read-only gunicorn API (:9000, container-internal) + SSE fan-out |
-| `fkoora-worker` | the only process that talks to goal.com (scheduler + refresh_jobs) |
-| `fkoora-frontend` | Next.js standalone (:3000, proxies every `/api/*` incl. SSE) |
-
-Quick start from the repository root:
+The whole stack runs as three containers — PostgreSQL, Flask API (gunicorn,
+one worker so the built-in scheduler runs exactly once) and the Next.js
+frontend (standalone build). Quick start in isolation:
 
 ```bash
-docker compose up -d --build
-# postgres :5432 (localhost only), redis :6379 (internal),
-# api :9000 (internal), frontend :3000
+docker compose up -d --build      # postgres :5432, api :8000, frontend :3000
 open http://127.0.0.1:3000
-docker compose logs -f fkoora-worker    # schema applies, scheduler ticks
 ```
 
-The one-shot `fkoora-migrate` container gates api/worker
-(`service_completed_successfully`) so both always start against a fully
-typed database - on a fresh volume it just creates the tables, on a legacy
-one it converts the TEXT date columns in place. Within a minute of the first
-worker tick today's matches land; live updates then stream to every browser
-over SSE (`/api/events/live`). To backfill history once, set
-`BOOTSTRAP_ON_START: "1"` in the worker environment (resumable background
-walk, ~10 years). For production behind Nginx Proxy Manager / Cloudflare
-Tunnel (fkoora.site → frontend, API stays internal because the frontend
-proxies every `/api/*` call server-side), see **`DEPLOY.md`** and
-**`docker-compose.fkoora-full.yml`** — including the full merged compose
-file, backup/restore and update recipes.
+The schema is created automatically on first start; within a minute the
+scheduler fills today's matches. For production behind Nginx Proxy Manager
+/ Cloudflare Tunnel (fkoora.site → frontend, API stays internal because the
+frontend proxies every `/api/*` call server-side), see **`DEPLOY.md`** —
+including the full merged compose file, backup/restore and update recipes.
 
 ## Caching / cron strategy
 
@@ -178,13 +146,6 @@ link is invisible in HTML, JSON and network traces.
 
 ## Frontend notes
 
-- **Live updates without polling the provider**: on the "today" view the
-  page opens one `EventSource('/api/events/live')` and patches ONLY the
-  affected match row when a `match.updated` delta arrives (score, status,
-  period, red cards — guarded by `data_version` so out-of-order events are
-  dropped). While SSE is connected the periodic HTTP refresh relaxes to a
-  5-minute safety net; if the stream fails repeatedly it falls back to the
-  regular 60 s live polling automatically — the page never breaks.
 - Bilingual EN/AR with full RTL mirroring (dialog headers, tabs, tables
   included), Arabic uses Latin digits (`ar-MA-u-nu-latn`).
 - Day listings are **local-calendar correct for any timezone** — the API

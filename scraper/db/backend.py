@@ -136,26 +136,12 @@ def connection(dsn: Optional[str] = None, *, pooled: bool = True) -> Iterator[ps
 # ---------------------------------------------------------------------------
 # script execution (schema.sql)
 # ---------------------------------------------------------------------------
-# Schema statements run with a short lock timeout: the API/worker apply the
-# idempotent schema on every start, and waiting forever behind a long scrape
-# transaction (or another process mid-apply) would hang startup. A statement
-# that cannot get its lock is skipped and retried on the next boot - every
-# statement is CREATE ... IF NOT EXISTS / ALTER ... IF NOT EXISTS, so a
-# partial apply is always safe.
-SCHEMA_LOCK_TIMEOUT_SEC = int(os.environ.get("SCHEMA_LOCK_TIMEOUT_SEC", "5"))
-_SKIP_LOCK_ERRORS = ("55P03", "57014", "40P01")   # lock_timeout/cancel/deadlock
-
-
 def run_script(conn: psycopg.Connection, script: str) -> None:
-    """Execute a multi-statement SQL script (schema.sql), statement by
-    statement.
+    """Execute a multi-statement SQL script (schema.sql).
 
     ``--`` comments are stripped first (they can contain ';'), then the script
     is split on ';' - the schema contains no semicolons inside string
-    literals, so a plain split is safe once comments are gone. Each statement
-    runs in its own transaction with a short lock timeout; statements that
-    time out on a lock are skipped (best effort, retried next start) rather
-    than blocking startup.
+    literals, so a plain split is safe once comments are gone.
     """
     stripped = []
     for line in script.splitlines():
@@ -163,27 +149,7 @@ def run_script(conn: psycopg.Connection, script: str) -> None:
         stripped.append(line if idx < 0 else line[:idx])
     cleaned = "\n".join(stripped)
     statements = [s.strip() for s in cleaned.split(";")]
-    skipped = 0
     for stmt in statements:
-        if not stmt:
-            continue
-        try:
-            with conn.transaction():
-                conn.execute(f"SET LOCAL lock_timeout = "
-                             f"'{SCHEMA_LOCK_TIMEOUT_SEC}s'")
-                conn.execute(stmt)
-        except psycopg.Error as exc:
-            # only lock-timeout / statement-cancel / deadlock errors are
-            # skippable - everything else is a real failure and propagates
-            code = getattr(exc, "sqlstate", None)
-            if code in _SKIP_LOCK_ERRORS:
-                skipped += 1
-                log.warning("schema statement skipped (lock timeout): %.60s", stmt)
-            else:
-                raise
-    if not conn.autocommit and conn.info.transaction_status != \
-            psycopg.pq.TransactionStatus.IDLE:
-        conn.commit()
-    if skipped:
-        log.warning("schema apply: %d statement(s) skipped on lock timeouts - "
-                    "they will apply on the next start", skipped)
+        if stmt:
+            conn.execute(stmt)
+    conn.commit()

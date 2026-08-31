@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Dialog,
   DialogClose,
@@ -9,15 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Loader2, RefreshCw, X } from "lucide-react";
-import type {
-  Lang,
-  LineupTeam,
-  MatchDetail,
-  MatchEvent,
-  MatchRow,
-  TeamRef,
-} from "@/lib/goal/types";
-import type { PlayerDialogTarget } from "./player-dialog";
+import type { Lang, LineupTeam, MatchDetail, MatchEvent, MatchRow } from "@/lib/goal/types";
 import {
   compLabel,
   formatDateTime,
@@ -39,10 +31,6 @@ interface MatchDialogProps {
   /** when defined, the dialog's open state is fully controlled by the parent
    *  (match page summary card); undefined = self-managed (listing behavior) */
   openOverride?: boolean;
-  /** open the team dialog for one of the two teams (header crest/name) */
-  onOpenTeam?: (team: TeamRef) => void;
-  /** open the player dialog for a lineup player */
-  onOpenPlayer?: (player: PlayerDialogTarget) => void;
 }
 
 export function MatchDialog({
@@ -51,8 +39,6 @@ export function MatchDialog({
   onClose,
   initialDetail,
   openOverride,
-  onOpenTeam,
-  onOpenPlayer,
 }: MatchDialogProps) {
   const s = t(lang);
   const [open, setOpen] = useState(false);
@@ -65,48 +51,25 @@ export function MatchDialog({
   const currentDetail =
     detail && match && detail.matchId === match.matchId ? detail : null;
 
-  const loadEpoch = useRef(0);
-  // stale-while-revalidate chain: a thin detail (detail rows still being
-  // fetched by the scraper worker) carries refreshing=true - quietly
-  // re-fetch a few seconds later, capped, until the full detail lands
-  const refreshChain = useRef(0);
-
   const load = useCallback(async () => {
     if (!match) return;
     setError(false);
-    const epoch = ++loadEpoch.current;
     try {
       const qs = new URLSearchParams();
       if (match.slugAr) qs.set("slugAr", match.slugAr);
       if (match.slugEn) qs.set("slugEn", match.slugEn);
-      let res = await fetch(`/api/match/${match.matchId}?${qs.toString()}`);
-      // A 404 can mean the detail rows are simply not in the database yet:
-      // the read-only backend records the gap and the scraper worker fills
-      // it within seconds - retry briefly before showing the error state.
-      for (let attempt = 0; attempt < 2 && res.status === 404; attempt++) {
-        await new Promise((r) => setTimeout(r, 3000));
-        if (epoch !== loadEpoch.current) return; // match changed meanwhile
-        res = await fetch(`/api/match/${match.matchId}?${qs.toString()}`);
-      }
+      const res = await fetch(`/api/match/${match.matchId}?${qs.toString()}`);
       if (!res.ok) throw new Error("failed");
-      if (epoch !== loadEpoch.current) return;
-      const data: MatchDetail = await res.json();
-      setDetail(data);
+      setDetail(await res.json());
     } catch {
-      if (epoch === loadEpoch.current) {
-        setError(true);
-      }
+      setError(true);
     }
   }, [match]);
 
   // data effect: seed from SSR detail when it belongs to this match (no
   // client fetch needed), otherwise fetch as before
   useEffect(() => {
-    if (!match) {
-      loadEpoch.current++; // stop any in-flight retry loop
-      return;
-    }
-    refreshChain.current = 0; // fresh re-fetch budget per match
+    if (!match) return;
     if (initialDetail && initialDetail.matchId === match.matchId) {
       setDetail(initialDetail);
       return;
@@ -115,21 +78,6 @@ export function MatchDialog({
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [match, load, initialDetail]);
-
-  // stale-while-revalidate: when the backend served a THIN detail (rows
-  // still being fetched by the scraper worker, refreshing=true), quietly
-  // re-fetch a few seconds later so the full detail appears without
-  // reopening the dialog. Chain is capped and resets on fresh data.
-  useEffect(() => {
-    if (!currentDetail?.refreshing) {
-      refreshChain.current = 0;
-      return;
-    }
-    if (refreshChain.current >= 4) return;
-    refreshChain.current += 1;
-    const timer = setTimeout(() => load(), 4000);
-    return () => clearTimeout(timer);
-  }, [currentDetail, load]);
 
   // open-state effect: skipped entirely when the parent controls the dialog
   // (openOverride defined) - it then opens/closes with the prop alone
@@ -196,16 +144,14 @@ export function MatchDialog({
                 })()}
               </DialogTitle>
 
-              {/* score row - team crest/name open the team dialog when the
-                  parent provides the handler (nested buttons inside the dialog
-                  header are fine: the header is a plain div, not an anchor) */}
+              {/* score row */}
               <div className="mt-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-                <TeamHeaderBlock
-                  team={home || undefined}
-                  lang={lang}
-                  strings={s}
-                  onOpenTeam={onOpenTeam}
-                />
+                <div className="flex flex-col items-center gap-1">
+                  <Crest url={home?.crestUrl} size={34} />
+                  <span className="text-center text-[13px] font-bold leading-tight">
+                    {nameOf(home || {}, lang)}
+                  </span>
+                </div>
 
                 <div className="flex flex-col items-center gap-1">
                   {showScore ? (
@@ -249,12 +195,12 @@ export function MatchDialog({
                   )}
                 </div>
 
-                <TeamHeaderBlock
-                  team={away || undefined}
-                  lang={lang}
-                  strings={s}
-                  onOpenTeam={onOpenTeam}
-                />
+                <div className="flex flex-col items-center gap-1">
+                  <Crest url={away?.crestUrl} size={34} />
+                  <span className="text-center text-[13px] font-bold leading-tight">
+                    {nameOf(away || {}, lang)}
+                  </span>
+                </div>
               </div>
 
               {/* meta line */}
@@ -363,16 +309,8 @@ export function MatchDialog({
                   {/* ---------- lineups ---------- */}
                   <TabsContent value="lineups" className="mt-3">
                     <div className="grid gap-4 md:grid-cols-2">
-                      <LineupColumn
-                        team={currentDetail.lineups.home}
-                        lang={lang}
-                        onOpenPlayer={onOpenPlayer}
-                      />
-                      <LineupColumn
-                        team={currentDetail.lineups.away}
-                        lang={lang}
-                        onOpenPlayer={onOpenPlayer}
-                      />
+                      <LineupColumn team={currentDetail.lineups.home} lang={lang} />
+                      <LineupColumn team={currentDetail.lineups.away} lang={lang} />
                     </div>
                   </TabsContent>
 
@@ -429,45 +367,6 @@ export function MatchDialog({
         )}
       </DialogContent>
     </Dialog>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// team header block (crest + name) - a button that opens the team dialog
-// ---------------------------------------------------------------------------
-function TeamHeaderBlock({
-  team,
-  lang,
-  strings: s,
-  onOpenTeam,
-}: {
-  team?: TeamRef;
-  lang: Lang;
-  strings: ReturnType<typeof t>;
-  onOpenTeam?: (team: TeamRef) => void;
-}) {
-  const clickable = !!onOpenTeam && !!team?.id;
-  const inner = (
-    <>
-      <Crest url={team?.crestUrl} size={34} />
-      <span className="text-center text-[13px] font-bold leading-tight">
-        {nameOf(team || {}, lang)}
-      </span>
-    </>
-  );
-  if (!clickable) {
-    return <div className="flex flex-col items-center gap-1">{inner}</div>;
-  }
-  return (
-    <button
-      type="button"
-      onClick={() => team && onOpenTeam?.(team)}
-      title={s.teamInfo}
-      aria-label={`${s.teamInfo}: ${nameOf(team || {}, lang)}`}
-      className="group flex flex-col items-center gap-1 rounded-md p-1 transition-colors hover:bg-white/10 focus:outline-none"
-    >
-      {inner}
-    </button>
   );
 }
 
@@ -650,15 +549,7 @@ function EventLabel({
 // ---------------------------------------------------------------------------
 // lineup column
 // ---------------------------------------------------------------------------
-function LineupColumn({
-  team,
-  lang,
-  onOpenPlayer,
-}: {
-  team?: LineupTeam;
-  lang: Lang;
-  onOpenPlayer?: (player: PlayerDialogTarget) => void;
-}) {
+function LineupColumn({ team, lang }: { team?: LineupTeam; lang: Lang }) {
   const s = t(lang);
   if (!team || team.entries.length === 0) {
     return (
@@ -671,64 +562,32 @@ function LineupColumn({
   const starters = team.entries.filter((e) => e.isStarter);
   const subs = team.entries.filter((e) => !e.isStarter);
 
-  // the whole row is a button (valid: button inside li) when the player has
-  // an id and the parent handles player dialogs
   const PlayerLine = ({
     entry,
     dim,
   }: {
     entry: (typeof team.entries)[number];
     dim?: boolean;
-  }) => {
-    const clickable = !!onOpenPlayer && !!entry.person.id;
-    const row = (
-      <>
-        <span className="w-6 shrink-0 text-end font-bold tabular-nums text-[#4a6b96]">
-          {entry.shirtNumber ?? ""}
-        </span>
-        <span className={`min-w-0 flex-1 truncate font-medium ${dim ? "" : "font-semibold"}`}>
-          {nameOf(entry.person, lang)}
-          {entry.isCaptain && (
-            <span className="ms-1 rounded bg-[#e8eff9] px-1 text-[10px] font-bold text-[#17457f]">
-              {s.captain}
-            </span>
-          )}
-        </span>
-        {entry.rating !== null && entry.rating !== undefined && (
-          <span className="shrink-0 rounded bg-[#eef3fa] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-[#33455e]">
-            {entry.rating}
+  }) => (
+    <li className={`flex items-center gap-2 py-1 text-[12.5px] ${dim ? "text-[#5b6b80]" : "text-[#1c2b3a]"}`}>
+      <span className="w-6 shrink-0 text-end font-bold tabular-nums text-[#4a6b96]">
+        {entry.shirtNumber ?? ""}
+      </span>
+      <span className={`min-w-0 flex-1 truncate font-medium ${dim ? "" : "font-semibold"}`}>
+        {nameOf(entry.person, lang)}
+        {entry.isCaptain && (
+          <span className="ms-1 rounded bg-[#e8eff9] px-1 text-[10px] font-bold text-[#17457f]">
+            {s.captain}
           </span>
         )}
-      </>
-    );
-    if (!clickable) {
-      return (
-        <li className={`flex items-center gap-2 py-1 text-[12.5px] ${dim ? "text-[#5b6b80]" : "text-[#1c2b3a]"}`}>
-          {row}
-        </li>
-      );
-    }
-    return (
-      <li>
-        <button
-          type="button"
-          onClick={() =>
-            onOpenPlayer?.({
-              id: entry.person.id!,
-              nameEn: entry.person.nameEn,
-              nameAr: entry.person.nameAr,
-            })
-          }
-          title={s.playerInfo}
-          className={`flex w-full items-center gap-2 rounded px-1 py-1 text-start text-[12.5px] transition-colors hover:bg-[#e8f1fb] focus:outline-none ${
-            dim ? "text-[#5b6b80]" : "text-[#1c2b3a]"
-          }`}
-        >
-          {row}
-        </button>
-      </li>
-    );
-  };
+      </span>
+      {entry.rating !== null && entry.rating !== undefined && (
+        <span className="shrink-0 rounded bg-[#eef3fa] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-[#33455e]">
+          {entry.rating}
+        </span>
+      )}
+    </li>
+  );
 
   return (
     <div className="rounded-md border border-[#dbe4ef] bg-white">

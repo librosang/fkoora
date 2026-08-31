@@ -23,8 +23,6 @@ import type {
   CompetitionMatchesResponse,
   ListingResponse,
   MatchDetail,
-  PlayerDetail,
-  TeamInfo,
 } from "./types";
 
 const API_BASE = process.env.FOOTBALL_API_BASE || "http://127.0.0.1:9000";
@@ -43,7 +41,7 @@ export interface ConditionalResult<T> {
   error: string | null;
 }
 
-export async function getConditional<T>(
+async function getConditional<T>(
   path: string,
   ifNoneMatch?: string | null,
 ): Promise<ConditionalResult<T>> {
@@ -131,34 +129,6 @@ export async function getCompetitionMatches(
   const qs = gamesetId ? `?gameset=${encodeURIComponent(gamesetId)}` : "";
   return getConditional<CompetitionMatchesResponse>(
     `/api/competition/${encodeURIComponent(competitionId)}/matches${qs}`,
-    ifNoneMatch,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// team profile (recent results + upcoming fixtures + squad)
-// ---------------------------------------------------------------------------
-export async function getTeam(
-  teamId: string,
-  ifNoneMatch?: string | null,
-): Promise<ConditionalResult<TeamInfo>> {
-  return getConditional<TeamInfo>(
-    `/api/team/${encodeURIComponent(teamId)}`,
-    ifNoneMatch,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// player profile (bio + career history)
-// ---------------------------------------------------------------------------
-export async function getPlayer(
-  playerId: string,
-  ifNoneMatch?: string | null,
-): Promise<ConditionalResult<PlayerDetail>> {
-  // an unprofiled player triggers a synchronous profile scrape upstream -
-  // same generous timeout as match details
-  return getConditional<PlayerDetail>(
-    `/api/player/${encodeURIComponent(playerId)}`,
     ifNoneMatch,
   );
 }

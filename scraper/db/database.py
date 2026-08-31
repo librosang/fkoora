@@ -8,7 +8,7 @@ fills in previously-missing columns (e.g. Arabic names from kooora).
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,39 +16,12 @@ import psycopg
 
 from .. import config
 from . import backend
-from . import migrate as _migrate
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _values_differ(old: Any, new: Any) -> bool:
-    """Compare a stored column value with an incoming scraper value.
-
-    Robust across the TEXT -> TIMESTAMPTZ/DATE migration: the stored side may
-    be a ``datetime``/``date`` object while the incoming side is the ISO
-    string the parsers produce (both normalize to the same wire string via
-    ``timeutil``). None == None; NULL-into-value and value-into-NULL count as
-    changes; numbers compare by value (int 2 == float 2.0).
-    """
-    if old is None and new is None:
-        return False
-    if old is None or new is None:
-        return True
-    if isinstance(old, (datetime, date)) or isinstance(new, (datetime, date)):
-        from ..timeutil import iso_z, iso_date
-        if isinstance(old, (datetime, date)) and isinstance(new, str):
-            return (iso_z(old) if isinstance(old, datetime) else iso_date(old)) != new.strip()
-        if isinstance(new, (datetime, date)) and isinstance(old, str):
-            return (iso_z(new) if isinstance(new, datetime) else iso_date(new)) != old.strip()
-        # both datetime/date
-        return iso_z(old) != iso_z(new)
-    if isinstance(old, (int, float)) and isinstance(new, (int, float)):
-        return old != new
-    return str(old) != str(new)
 
 
 class Database:
@@ -62,28 +35,11 @@ class Database:
         # league's standings right away - a table only ever changes when one
         # of its matches ends (see config.MATCH_ENDED_STATUSES).
         self.newly_finished_comps: set = set()
-        # matches whose client-visible data changed during writes on THIS
-        # connection, with the data_version the change produces. The worker
-        # drains this AFTER commit and publishes SSE / Redis live updates
-        # for exactly these matches (unchanged matches never broadcast).
-        #   {match_id: {"version": int, "fields": [..], "inserted": bool}}
-        self.changed_matches: Dict[str, Dict[str, Any]] = {}
-        # new match events (goals/cards/...) observed during a detail write:
-        #   {match_id: [{"eventType":.., "minute":.., "teamSide":..,
-        #                "playerId":.., "playerNameEn":.., ...}, ...]}
-        # drained by the worker into `match.event` SSE messages.
-        self.new_match_events: Dict[str, List[Dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     def _init_schema(self) -> None:
         with open(SCHEMA_PATH, encoding="utf-8") as fh:
             backend.run_script(self.conn, fh.read())
-        # TEXT -> TIMESTAMPTZ/DATE conversion for databases created before
-        # the typed schema (idempotent: no-op when already converted).
-        try:
-            _migrate.migrate_types(self.conn)
-        except Exception as exc:  # noqa: BLE001 - serving must not break
-            log.warning("type migration deferred: %s", exc)
 
     def close(self) -> None:
         self.conn.commit()
@@ -372,75 +328,21 @@ class Database:
     # ==================================================================
     # matches
     # ==================================================================
-    # fields that make a listing update MEANINGFUL for a client: a change in
-    # any of these is what the live layer broadcasts (see live.py). Everything
-    # else (slugs, bookkeeping timestamps, venue links) is not client-visible
-    # live state and never triggers a broadcast.
-    _LIVE_COMPARE_FIELDS = (
-        "status", "period", "kickoff_utc", "match_date",
-        "home_score", "away_score",
-        "home_agg_score", "away_agg_score",
-        "home_red_cards", "away_red_cards",
-    )
-
     def upsert_match_from_listing(self, row: Dict[str, Any], listed_date: str) -> None:
         """Upsert a match row coming from a fixtures listing (either site)."""
         kickoff = row.get("kickoff_utc") or ""
         match_date = kickoff[:10] if len(kickoff) >= 10 else listed_date
         now = utcnow()
 
-        # current row (if any) - powers BOTH the match-end event below AND
-        # the change detection that decides whether this upsert bumps
-        # data_version / gets published to the live channel. One SELECT,
-        # both jobs.
-        prev = self.conn.execute(
-            """SELECT status, period, kickoff_utc, match_date,
-                      home_score, away_score, home_agg_score, away_agg_score,
-                      home_red_cards, away_red_cards, data_version
-               FROM matches WHERE id = %s""",
-            (row["match_id"],),
-        ).fetchone()
-
         # match-end event: a transition into an ended status is the moment a
         # league table changes - remember the competition so the caller can
         # refresh its standings immediately instead of on the next warm tick.
         if (row.get("status") or "").upper() in config.MATCH_ENDED_STATUSES:
+            prev = self.conn.execute(
+                "SELECT status FROM matches WHERE id = %s", (row["match_id"],)
+            ).fetchone()
             if prev is None or (prev["status"] or "").upper() not in config.MATCH_ENDED_STATUSES:
                 self.newly_finished_comps.add(row["competition"]["id"])
-
-        # ---- change detection (only meaningful fields, COALESCE semantics) --
-        # The upsert overwrites the row with the NEW values where the new
-        # value is non-NULL; a NULL new value keeps the old one. Compute the
-        # EFFECTIVE new state and compare - an unchanged provider response
-        # ("Real Madrid 2-1 Barcelona, 67'" twice) must NOT bump the version
-        # and must NOT broadcast anything.
-        new_values = {
-            "status": row.get("status") or "UNKNOWN",
-            "period": row.get("period"),
-            "kickoff_utc": kickoff,
-            "match_date": match_date,
-            "home_score": row.get("home_score"),
-            "away_score": row.get("away_score"),
-            "home_agg_score": row.get("home_agg_score"),
-            "away_agg_score": row.get("away_agg_score"),
-            "home_red_cards": row.get("home_red_cards", 0),
-            "away_red_cards": row.get("away_red_cards", 0),
-        }
-        version_bump = 0
-        changed_fields: List[str] = []
-        if prev is None:
-            version_bump = 1
-            changed_fields = ["__insert__"]
-        else:
-            for field in self._LIVE_COMPARE_FIELDS:
-                old_v = prev[field]
-                new_v = new_values[field]
-                # COALESCE: a NULL new value keeps the stored one
-                eff_v = new_v if new_v is not None else old_v
-                if _values_differ(old_v, eff_v):
-                    changed_fields.append(field)
-            if changed_fields:
-                version_bump = 1
 
         # venue handling: resolve by ENGLISH name only here. Arabic-only venue
         # names must NOT create a row (that could duplicate an existing
@@ -457,7 +359,6 @@ class Database:
                 home_team_id, away_team_id, venue_id,
                 home_score, away_score, home_agg_score, away_agg_score,
                 home_red_cards, away_red_cards, slug_en, slug_ar, last_updated_at,
-                data_version,
                 first_seen_at, last_seen_at2
             ) VALUES (
                 %(match_id)s, %(competition_id)s, %(kickoff_utc)s, %(match_date)s,
@@ -469,7 +370,6 @@ class Database:
                 %(home_score)s, %(away_score)s, %(home_agg_score)s, %(away_agg_score)s,
                 %(home_red_cards)s, %(away_red_cards)s, %(slug_en)s, %(slug_ar)s,
                 %(last_updated_at)s,
-                %(version_bump)s,
                 %(now)s, %(now)s
             )
             ON CONFLICT(id) DO UPDATE SET
@@ -494,7 +394,6 @@ class Database:
                 slug_en          = COALESCE(excluded.slug_en, matches.slug_en),
                 slug_ar          = COALESCE(excluded.slug_ar, matches.slug_ar),
                 last_updated_at  = COALESCE(excluded.last_updated_at, matches.last_updated_at),
-                data_version     = matches.data_version + excluded.data_version,
                 last_seen_at2    = excluded.last_seen_at2
             """,
             {
@@ -522,20 +421,9 @@ class Database:
                 "slug_en": row.get("slug_en"),
                 "slug_ar": row.get("slug_ar"),
                 "last_updated_at": row.get("last_updated_at"),
-                "version_bump": version_bump,
                 "now": now,
             },
         )
-
-        if version_bump:
-            new_version = (prev["data_version"] if prev else 0) + 1
-            entry = self.changed_matches.get(row["match_id"]) or {
-                "version": new_version, "fields": [], "inserted": prev is None,
-            }
-            entry["version"] = new_version
-            entry["fields"] = sorted(set(entry["fields"] + changed_fields))
-            entry["inserted"] = entry["inserted"] or prev is None
-            self.changed_matches[row["match_id"]] = entry
 
     def update_match_venue_ar(self, match_id: str, venue_name_ar: Optional[str]) -> None:
         """Attach an Arabic venue name to the match's venue row."""
@@ -574,15 +462,7 @@ class Database:
         # ---- venue (bilingual + coordinates) ----------------------------------
         venue = detail.get("venue") or {}
         existing = self.conn.execute(
-            """SELECT venue_id, competition_id, status, period, referee,
-                      home_score, away_score, home_agg_score, away_agg_score,
-                      home_pen_score, away_pen_score,
-                      home_score_ht, away_score_ht,
-                      home_score_ft, away_score_ft,
-                      home_score_et, away_score_et,
-                      lineups_confirmed, home_formation, away_formation,
-                      detail_fetched_at, data_version
-               FROM matches WHERE id = %s""",
+            "SELECT venue_id, competition_id, status FROM matches WHERE id = %s",
             (match_id,),
         ).fetchone()
         # match-end event (same logic as upsert_match_from_listing): detail
@@ -623,161 +503,6 @@ class Database:
                     "UPDATE matches SET venue_id = %s WHERE id = %s", (vid, match_id)
                 )
 
-        # ---- change detection (detail side) ------------------------------------
-        # Which client-visible parts of the detail payload actually differ
-        # from what is stored? Detail refreshes re-arrive every couple of
-        # minutes for live matches, and an unchanged page must NOT bump
-        # data_version or broadcast anything. The same computation also
-        # yields the NEW events (goals/cards/subs) for `match.event` SSE
-        # messages. COALESCE semantics apply: a NULL in the payload keeps
-        # the stored value.
-        detail_compare: List[str] = []
-        if existing is None:
-            detail_compare = ["__insert__"]
-        else:
-            _eff = lambda new, old: new if new is not None else old  # noqa: E731
-            pairs = (
-                ("status", _eff(detail.get("status"), existing["status"])),
-                ("period", _eff(detail.get("period"), existing["period"])),
-                ("home_score", _eff(detail.get("home_score"), existing["home_score"])),
-                ("away_score", _eff(detail.get("away_score"), existing["away_score"])),
-                ("home_agg_score", _eff(detail.get("home_agg_score"), existing["home_agg_score"])),
-                ("away_agg_score", _eff(detail.get("away_agg_score"), existing["away_agg_score"])),
-                ("home_pen_score", _eff(detail.get("home_pen_score"), existing["home_pen_score"])),
-                ("away_pen_score", _eff(detail.get("away_pen_score"), existing["away_pen_score"])),
-                ("home_score_ht", _eff(detail.get("home_score_ht"), existing["home_score_ht"])),
-                ("away_score_ht", _eff(detail.get("away_score_ht"), existing["away_score_ht"])),
-                ("home_score_ft", _eff(detail.get("home_score_ft"), existing["home_score_ft"])),
-                ("away_score_ft", _eff(detail.get("away_score_ft"), existing["away_score_ft"])),
-                ("home_score_et", _eff(detail.get("home_score_et"), existing["home_score_et"])),
-                ("away_score_et", _eff(detail.get("away_score_et"), existing["away_score_et"])),
-                ("referee", _eff(detail.get("referee"), existing["referee"])),
-                ("home_formation", _eff(((detail.get("lineups") or {}).get("teams") or {}).get("home", {}).get("formation"), existing["home_formation"])),
-                ("away_formation", _eff(((detail.get("lineups") or {}).get("teams") or {}).get("away", {}).get("formation"), existing["away_formation"])),
-            )
-            for field, eff_v in pairs:
-                if _values_differ(existing[field], eff_v):
-                    detail_compare.append(field)
-            if (1 if (detail.get("lineups") or {}).get("confirmed") else 0) \
-                    > (existing["lineups_confirmed"] or 0):
-                detail_compare.append("lineups_confirmed")
-
-        # ---- previous events / lineups / stats (BEFORE the writes) -------------
-        # One read serves THREE masters: the language-preserving COALESCE
-        # below, the event-diff change detection, and the new-event list that
-        # becomes `match.event` SSE messages.
-        prev_event_names: Dict[Any, Dict[str, Optional[str]]] = {}
-        prev_event_state: Dict[Any, Dict[str, Any]] = {}
-        for old in self.conn.execute(
-            """SELECT player_id, related_player_id, event_type, minute, extra_minute,
-                      player_name_en, player_name_ar,
-                      related_player_name_en, related_player_name_ar,
-                      team_side, home_score_after, away_score_after,
-                      outcome, decision, sort_order
-               FROM match_events WHERE match_id = %s""",
-            (match_id,),
-        ).fetchall():
-            key = (old["player_id"], old["related_player_id"], old["event_type"],
-                   old["minute"], old["extra_minute"])
-            prev_event_names[key] = {
-                "player_name_en": old["player_name_en"],
-                "player_name_ar": old["player_name_ar"],
-                "related_player_name_en": old["related_player_name_en"],
-                "related_player_name_ar": old["related_player_name_ar"],
-            }
-            prev_event_state[key] = {
-                "team_side": old["team_side"],
-                "home_score_after": old["home_score_after"],
-                "away_score_after": old["away_score_after"],
-                "outcome": old["outcome"],
-                "decision": old["decision"],
-                "sort_order": old["sort_order"],
-            }
-
-        # event identity of the incoming payload
-        def _event_key(ev: Dict[str, Any]) -> Any:
-            player = ev.get("player") or {}
-            related = ev.get("related_player") or {}
-            return (player.get("id"), related.get("id"), ev["event_type"],
-                    ev.get("minute"), ev.get("extra_minute"))
-
-        new_event_keys = {_event_key(ev) for ev in detail.get("events", [])}
-        prev_event_keys = set(prev_event_names.keys())
-        added_events: List[Dict[str, Any]] = []
-        if new_event_keys != prev_event_keys:
-            detail_compare.append("events")
-        for ev in detail.get("events", []):
-            key = _event_key(ev)
-            if key not in prev_event_state:
-                player = ev.get("player") or {}
-                related = ev.get("related_player") or {}
-                added_events.append({
-                    "eventType": ev["event_type"],
-                    "minute": ev.get("minute"),
-                    "extraMinute": ev.get("extra_minute"),
-                    "teamSide": ev.get("team_side"),
-                    "playerId": player.get("id"),
-                    "playerNameEn": player.get("name_en"),
-                    "playerNameAr": player.get("name_ar"),
-                    "relatedPlayerId": related.get("id"),
-                    "relatedPlayerNameEn": related.get("name_en"),
-                    "relatedPlayerNameAr": related.get("name_ar"),
-                    "homeScoreAfter": ev.get("home_score_after"),
-                    "awayScoreAfter": ev.get("away_score_after"),
-                    "outcome": ev.get("outcome"),
-                    "decision": ev.get("decision"),
-                })
-            else:
-                # same identity but different outcome (VAR overturn,
-                # score-after correction) still counts as a change
-                st = prev_event_state[key]
-                if (ev.get("outcome") != st["outcome"]
-                        or ev.get("decision") != st["decision"]
-                        or ev.get("home_score_after") != st["home_score_after"]
-                        or ev.get("away_score_after") != st["away_score_after"]):
-                    detail_compare.append("events")
-
-        # lineup identity diff (per team: the set of players)
-        _lineups = detail.get("lineups") or {}
-        new_lineup_ids: set = set()
-        for side in ("home", "away"):
-            team = (_lineups.get("teams") or {}).get(side) or {}
-            for entry in team.get("entries", []):
-                person = entry.get("person") or {}
-                if person.get("id"):
-                    new_lineup_ids.add((team["team_id"], person["id"]))
-        if existing is not None:
-            prev_lineup_ids = {
-                (r["team_id"], r["player_id"]) for r in self.conn.execute(
-                    "SELECT team_id, player_id FROM lineups WHERE match_id = %s",
-                    (match_id,),
-                ).fetchall()
-            }
-            if new_lineup_ids != prev_lineup_ids:
-                detail_compare.append("lineups")
-
-        # stats diff ((team, stat_type, value) set)
-        _home_tid = ((_lineups.get("teams") or {}).get("home") or {}).get("team_id")
-        _away_tid = ((_lineups.get("teams") or {}).get("away") or {}).get("team_id")
-        new_stat_rows: set = set()
-        for stat in detail.get("stats", []):
-            for tid, value in ((_home_tid, stat.get("home_value")),
-                               (_away_tid, stat.get("away_value"))):
-                if tid and value is not None:
-                    new_stat_rows.add((tid, stat["stat_type"], float(value)))
-        if existing is not None:
-            prev_stat_rows = {
-                (r["team_id"], r["stat_type"], float(r["value"])) for r in self.conn.execute(
-                    """SELECT team_id, stat_type, value FROM team_match_stats
-                       WHERE match_id = %s AND value IS NOT NULL""",
-                    (match_id,),
-                ).fetchall()
-            }
-            if new_stat_rows != prev_stat_rows:
-                detail_compare.append("statistics")
-
-        version_bump = 1 if detail_compare else 0
-
         # refresh scores + meta (gameset_name_ar may arrive from AR pages)
         self.conn.execute(
             """
@@ -804,8 +529,7 @@ class Database:
                 home_formation = COALESCE(%(home_formation)s, home_formation),
                 away_formation = COALESCE(%(away_formation)s, away_formation),
                 season_id = COALESCE(%(season_id)s, season_id),
-                detail_fetched_at = %(now)s,
-                data_version = data_version + %(version_bump)s
+                detail_fetched_at = %(now)s
             WHERE id = %(match_id)s
             """,
             {
@@ -832,7 +556,6 @@ class Database:
                 "away_formation": ((detail.get("lineups") or {}).get("teams") or {}).get("away", {}).get("formation"),
                 "season_id": season.get("id"),
                 "now": utcnow(),
-                "version_bump": version_bump,
                 "match_id": match_id,
             },
         )
@@ -846,8 +569,24 @@ class Database:
         # the language the new payload does not carry - remember each stored
         # event's names first, then COALESCE them back in by event identity
         # (person ids + type + minute), so an EN-only or AR-only refresh
-        # keeps the other language's names intact. (prev_event_names was
-        # read above, before any writes.)
+        # keeps the other language's names intact.
+        prev_event_names: Dict[Any, Dict[str, Optional[str]]] = {}
+        for old in self.conn.execute(
+            """SELECT player_id, related_player_id, event_type, minute, extra_minute,
+                      player_name_en, player_name_ar,
+                      related_player_name_en, related_player_name_ar
+               FROM match_events WHERE match_id = %s""",
+            (match_id,),
+        ).fetchall():
+            prev_event_names[
+                (old["player_id"], old["related_player_id"], old["event_type"],
+                 old["minute"], old["extra_minute"])
+            ] = {
+                "player_name_en": old["player_name_en"],
+                "player_name_ar": old["player_name_ar"],
+                "related_player_name_en": old["related_player_name_en"],
+                "related_player_name_ar": old["related_player_name_ar"],
+            }
 
         self.conn.execute("DELETE FROM match_events WHERE match_id = %s", (match_id,))
         self.conn.execute("DELETE FROM lineups WHERE match_id = %s", (match_id,))
@@ -941,22 +680,6 @@ class Database:
                                value = excluded.value""",
                         (match_id, team_id, stat["stat_type"], value),
                     )
-
-        # ---- record the change for the live layer --------------------------------
-        # The worker drains these AFTER COMMIT and publishes SSE / Redis
-        # updates for exactly this match - never for an unchanged one.
-        if version_bump:
-            new_version = (existing["data_version"] if existing else 0) + 1
-            entry = self.changed_matches.get(match_id) or {
-                "version": new_version, "fields": [], "inserted": existing is None,
-            }
-            entry["version"] = new_version
-            entry["fields"] = sorted(set(entry["fields"] + detail_compare))
-            entry["inserted"] = entry["inserted"] or existing is None
-            self.changed_matches[match_id] = entry
-            if added_events:
-                known = self.new_match_events.setdefault(match_id, [])
-                self.new_match_events[match_id] = known + added_events
 
     # ==================================================================
     # standings + gamesets (competition feature)

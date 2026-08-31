@@ -10,10 +10,8 @@ import type {
   GamesetRef,
   Lang,
   MatchRow,
-  StandingRow,
   StandingsMarker,
   StandingsTable,
-  TeamRef,
 } from "@/lib/goal/types";
 import { compLabel, nameOf, statusDisplay, t } from "@/lib/i18n";
 import {
@@ -23,16 +21,8 @@ import {
   matchTitle,
   matchDescription,
   matchUrlFor,
-  playerDescription,
-  playerTitle,
-  playerUrlFor,
-  teamDescription,
-  teamTitle,
-  teamUrlFor,
 } from "@/lib/seo";
 import { MatchDialog } from "./match-dialog";
-import { TeamDialog } from "./team-dialog";
-import { PlayerDialog, type PlayerDialogTarget } from "./player-dialog";
 import { Crest } from "./crest";
 
 interface CompetitionPageClientProps {
@@ -69,16 +59,6 @@ export function CompetitionPageClient({
   // true while the browser URL points at a /match/<id> page pushed from this
   // page (closing the dialog pops back with history.back())
   const pushedMatchUrl = useRef(false);
-  // a team opened from the standings rows / the match dialog (dialog + URL push)
-  const [dialogTeam, setDialogTeam] = useState<TeamRef | null>(null);
-  const pushedTeamUrl = useRef(false);
-  // a player opened from lineups / the team dialog's squad (dialog + URL push)
-  const [dialogPlayer, setDialogPlayer] = useState<PlayerDialogTarget | null>(null);
-  const pushedPlayerUrl = useRef(false);
-  // which dialog sits ON TOP when both the team and player dialogs are open
-  // ("team" = team opened from the player's club chip, "player" = player
-  // opened from the team's squad list); null = no stacking
-  const [topDialog, setTopDialog] = useState<"team" | "player" | null>(null);
 
   const s = t(lang);
   const rtl = lang === "ar";
@@ -149,22 +129,6 @@ export function CompetitionPageClient({
       ?.setAttribute("content", matchDescription(m, lang));
   }, []);
 
-  /** apply the team page's SEO meta while its URL is showing */
-  const applyTeamMeta = useCallback((team: TeamRef, lang: Lang) => {
-    document.title = teamTitle(team, lang);
-    document
-      .querySelector('meta[name="description"]')
-      ?.setAttribute("content", teamDescription(team, lang));
-  }, []);
-
-  /** apply the player page's SEO meta while its URL is showing */
-  const applyPlayerMeta = useCallback((p: PlayerDialogTarget, lang: Lang) => {
-    document.title = playerTitle(p, lang);
-    document
-      .querySelector('meta[name="description"]')
-      ?.setAttribute("content", playerDescription({ player: p }, lang));
-  }, []);
-
   /** restore this competition page's SEO meta */
   const restoreCompMeta = useCallback(
     (lang: Lang) => {
@@ -186,46 +150,28 @@ export function CompetitionPageClient({
     [info],
   );
 
-  /** open a match from the round list / the team dialog: dialog + slug URL +
-   *  match meta. When the team dialog is open on top, the clicked match TAKES
-   *  ITS PLACE: the team dialog closes and its URL entry is REPLACED (same
-   *  history depth, no async back()/push() dance). */
+  /** open a match from the round list: dialog + slug URL + match meta */
   const openMatch = useCallback(
     (m: MatchRow) => {
-      const fromTeamDialog = !!dialogTeam;
-      if (fromTeamDialog) {
-        setDialogTeam(null);
-        setTopDialog((top) => (top === "team" ? null : top));
-        // the /team/<id> entry is consumed by the replaceState below
-        pushedTeamUrl.current = false;
-      }
       setDialogMatch(m);
       try {
-        const url = matchUrlFor(m.matchId, m, lang);
-        if (fromTeamDialog) {
-          window.history.replaceState({ mcMatch: m.matchId }, "", url);
-        } else {
-          window.history.pushState({ mcMatch: m.matchId }, "", url);
-        }
+        window.history.pushState(
+          { mcMatch: m.matchId },
+          "",
+          matchUrlFor(m.matchId, m, lang),
+        );
         pushedMatchUrl.current = true;
       } catch {
-        /* history unavailable - the dialog still opens, just no URL change */
+        /* history unavailable - the dialog still opens */
       }
       applyMatchMeta(m, lang);
     },
-    [lang, applyMatchMeta, dialogTeam],
+    [lang, applyMatchMeta],
   );
 
   const closeMatch = useCallback(() => {
     setDialogMatch(null);
-    // whatever dialog is still open underneath gets ITS meta restored
-    if (dialogPlayer) {
-      applyPlayerMeta(dialogPlayer, lang);
-    } else if (dialogTeam) {
-      applyTeamMeta(dialogTeam, lang);
-    } else {
-      restoreCompMeta(lang);
-    }
+    restoreCompMeta(lang);
     if (pushedMatchUrl.current) {
       pushedMatchUrl.current = false;
       try {
@@ -234,122 +180,15 @@ export function CompetitionPageClient({
         /* ignore */
       }
     }
-  }, [lang, restoreCompMeta, dialogPlayer, dialogTeam, applyPlayerMeta, applyTeamMeta]);
+  }, [lang, restoreCompMeta]);
 
-  /** open a team from the standings rows / the match dialog header / the
-   *  player dialog's club chip: dialog + slug URL + team meta.
-   *  When opened FROM the player dialog, the team dialog TAKES THE PLAYER'S
-   *  PLACE (replaceState, same as a match clicked inside the team dialog):
-   *  re-elevating an already-open dialog breaks Radix's Escape layer order
-   *  (one Escape would close both at once). */
-  const openTeam = useCallback(
-    (team: TeamRef) => {
-      if (!team?.id) return;
-      const fromPlayerDialog = !!dialogPlayer;
-      if (fromPlayerDialog) {
-        setDialogPlayer(null);
-        setTopDialog(null);
-        // the /player/<id> entry is consumed by the replaceState below
-        pushedPlayerUrl.current = false;
-      }
-      setDialogTeam(team);
-      try {
-        const url = teamUrlFor(team.id, team, lang);
-        if (fromPlayerDialog) {
-          window.history.replaceState({ mcTeam: team.id }, "", url);
-        } else {
-          window.history.pushState({ mcTeam: team.id }, "", url);
-        }
-        pushedTeamUrl.current = true;
-      } catch {
-        /* history unavailable - the dialog still opens */
-      }
-      applyTeamMeta(team, lang);
-    },
-    [applyTeamMeta, lang, dialogPlayer],
-  );
-
-  const closeTeam = useCallback(() => {
-    setDialogTeam(null);
-    setTopDialog((top) => (top === "team" ? null : top));
-    // restore the meta of whatever is open underneath
-    if (dialogPlayer) {
-      applyPlayerMeta(dialogPlayer, lang);
-    } else if (dialogMatch) {
-      applyMatchMeta(dialogMatch, lang);
-    } else {
-      restoreCompMeta(lang);
-    }
-    if (pushedTeamUrl.current) {
-      pushedTeamUrl.current = false;
-      try {
-        window.history.back();
-      } catch {
-        /* ignore */
-      }
-    }
-  }, [lang, restoreCompMeta, dialogPlayer, dialogMatch, applyPlayerMeta, applyMatchMeta]);
-
-  /** open a player (lineups / the team dialog's squad): dialog + slug URL +
-   *  player meta */
-  const openPlayer = useCallback(
-    (p: PlayerDialogTarget) => {
-      if (!p?.id) return;
-      setDialogPlayer(p);
-      // player opened FROM the team dialog -> player stacks on top
-      if (dialogTeam) setTopDialog("player");
-      try {
-        window.history.pushState({ mcPlayer: p.id }, "", playerUrlFor(p.id, p, lang));
-        pushedPlayerUrl.current = true;
-      } catch {
-        /* history unavailable - the dialog still opens */
-      }
-      applyPlayerMeta(p, lang);
-    },
-    [applyPlayerMeta, lang, dialogTeam],
-  );
-
-  const closePlayer = useCallback(() => {
-    setDialogPlayer(null);
-    setTopDialog((top) => (top === "player" ? null : top));
-    // restore the meta of whatever is open underneath
-    if (dialogTeam) {
-      applyTeamMeta(dialogTeam, lang);
-    } else if (dialogMatch) {
-      applyMatchMeta(dialogMatch, lang);
-    } else {
-      restoreCompMeta(lang);
-    }
-    if (pushedPlayerUrl.current) {
-      pushedPlayerUrl.current = false;
-      try {
-        window.history.back();
-      } catch {
-        /* ignore */
-      }
-    }
-  }, [lang, restoreCompMeta, dialogTeam, dialogMatch, applyTeamMeta, applyMatchMeta]);
-
-  // browser BACK from a pushed /match, /team or /player URL: close the
-  // dialog + restore (each dialog only closes when the URL left ITS path)
+  // browser BACK from a pushed /match/<id> URL: close the dialog + restore
   useEffect(() => {
     const onPopState = () => {
-      const path = window.location.pathname;
-      if (!path.startsWith("/match/") && pushedMatchUrl.current) {
+      const onMatchUrl = window.location.pathname.startsWith("/match/");
+      if (!onMatchUrl && pushedMatchUrl.current) {
         pushedMatchUrl.current = false;
         setDialogMatch(null);
-        restoreCompMeta(lang);
-      }
-      if (!path.startsWith("/team/") && pushedTeamUrl.current) {
-        pushedTeamUrl.current = false;
-        setDialogTeam(null);
-        setTopDialog((top) => (top === "team" ? null : top));
-        restoreCompMeta(lang);
-      }
-      if (!path.startsWith("/player/") && pushedPlayerUrl.current) {
-        pushedPlayerUrl.current = false;
-        setDialogPlayer(null);
-        setTopDialog((top) => (top === "player" ? null : top));
         restoreCompMeta(lang);
       }
     };
@@ -500,14 +339,12 @@ export function CompetitionPageClient({
               </div>
             </div>
 
-            {/* standings table (server-rendered, crawler-visible; team names
-                are real links to the team pages - crawler food) */}
+            {/* standings table (server-rendered, crawler-visible) */}
             {standings && standings.tables.length > 0 ? (
               <StandingsSection
                 tables={standings.tables}
                 markers={standings.markers}
                 lang={lang}
-                onOpenTeam={openTeam}
               />
             ) : (
               <div className="rounded-md border border-[#c3cedd] bg-white px-4 py-8 text-center shadow-sm">
@@ -598,33 +435,8 @@ export function CompetitionPageClient({
 
       {/* ======= match dialog (opened from a round match) ======= */}
       {dialogMatch && (
-        <MatchDialog
-          match={dialogMatch}
-          lang={lang}
-          onClose={closeMatch}
-          onOpenTeam={openTeam}
-          onOpenPlayer={openPlayer}
-        />
+        <MatchDialog match={dialogMatch} lang={lang} onClose={closeMatch} />
       )}
-
-      {/* ======= team dialog (opened from the standings / a match) ======= */}
-      <TeamDialog
-        team={dialogTeam}
-        lang={lang}
-        onClose={closeTeam}
-        onOpenMatch={openMatch}
-        onOpenPlayer={openPlayer}
-        elevated={topDialog === "team"}
-      />
-
-      {/* ======= player dialog (opened from lineups / the squad) ======= */}
-      <PlayerDialog
-        player={dialogPlayer}
-        lang={lang}
-        onClose={closePlayer}
-        onOpenTeam={openTeam}
-        elevated={topDialog === "player"}
-      />
     </div>
   );
 }
@@ -643,19 +455,15 @@ function markerColor(marker: StandingsMarker | undefined): string | null {
   return "#1d4f92";
 }
 
-/** Standings table - server-rendered on first paint, real crawler content.
- *  Team names are real <a href> links to the team pages (internal links for
- *  crawlers), intercepted on click to open the team dialog. */
+/** Standings table - server-rendered on first paint, real crawler content. */
 function StandingsSection({
   tables,
   markers,
   lang,
-  onOpenTeam,
 }: {
   tables: StandingsTable[];
   markers: StandingsMarker[];
   lang: Lang;
-  onOpenTeam: (team: TeamRef) => void;
 }) {
   const s = t(lang);
   const markerById = useMemo(
@@ -692,15 +500,46 @@ function StandingsSection({
                   </tr>
                 </thead>
                 <tbody>
-                  {table.rows.map((r) => (
-                    <StandingTeamRow
-                      key={r.team.id || r.position}
-                      r={r}
-                      zone={markerById[r.markers[0]]}
-                      lang={lang}
-                      onOpenTeam={onOpenTeam}
-                    />
-                  ))}
+                  {table.rows.map((r) => {
+                    const zone = markerById[r.markers[0]];
+                    const zoneColor = markerColor(zone);
+                    return (
+                      <tr
+                        key={r.team.id || r.position}
+                        className="border-b border-[#e2e9f2] last:border-b-0 hover:bg-[#f6f9fd]"
+                      >
+                        <td className="px-1.5 py-1.5 text-center">
+                          <span className="inline-flex items-center justify-center gap-1">
+                            {zoneColor && (
+                              <span
+                                aria-hidden="true"
+                                title={zone ? nameOf(zone, lang) : undefined}
+                                style={{ backgroundColor: zoneColor }}
+                                className="inline-block h-2.5 w-1 rounded-sm"
+                              />
+                            )}
+                            <span className="font-bold tabular-nums text-[#33455e]">
+                              {r.position}
+                            </span>
+                          </span>
+                        </td>
+                        <td className="px-1.5 py-1.5">
+                          <span className="flex items-center gap-1.5">
+                            <Crest url={r.team.crestUrl} size={18} />
+                            <span className="font-semibold">{nameOf(r.team, lang)}</span>
+                          </span>
+                        </td>
+                        <td className="px-1.5 py-1.5 text-center tabular-nums">{r.played ?? "-"}</td>
+                        <td className="px-1.5 py-1.5 text-center tabular-nums">{r.win ?? "-"}</td>
+                        <td className="px-1.5 py-1.5 text-center tabular-nums">{r.draw ?? "-"}</td>
+                        <td className="px-1.5 py-1.5 text-center tabular-nums">{r.lose ?? "-"}</td>
+                        <td className="px-1.5 py-1.5 text-center tabular-nums">{r.goalDiff ?? "-"}</td>
+                        <td className="px-1.5 py-1.5 text-center font-extrabold tabular-nums text-[#17457f]">
+                          {r.points ?? "-"}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -723,67 +562,6 @@ function StandingsSection({
         )}
       </div>
     </section>
-  );
-}
-
-/**
- * One standings row. The team cell is a real <a href> to the team's own page
- * in the CURRENT language (internal link for crawlers), intercepted on click
- * to open the team dialog + push the URL - the same treatment round matches
- * get.
- */
-function StandingTeamRow({
-  r,
-  zone,
-  lang,
-  onOpenTeam,
-}: {
-  r: StandingRow;
-  zone: StandingsMarker | undefined;
-  lang: Lang;
-  onOpenTeam: (team: TeamRef) => void;
-}) {
-  const zoneColor = markerColor(zone);
-  const teamHref = r.team.id ? teamUrlFor(r.team.id, r.team, lang) : undefined;
-
-  return (
-    <tr className="border-b border-[#e2e9f2] last:border-b-0 hover:bg-[#f6f9fd]">
-      <td className="px-1.5 py-1.5 text-center">
-        <span className="inline-flex items-center justify-center gap-1">
-          {zoneColor && (
-            <span
-              aria-hidden="true"
-              title={zone ? nameOf(zone, lang) : undefined}
-              style={{ backgroundColor: zoneColor }}
-              className="inline-block h-2.5 w-1 rounded-sm"
-            />
-          )}
-          <span className="font-bold tabular-nums text-[#33455e]">{r.position}</span>
-        </span>
-      </td>
-      <td className="px-1.5 py-1.5">
-        <a
-          href={teamHref}
-          onClick={(e) => {
-            if (!r.team.id) return; // no id -> nothing to open, follow nothing
-            e.preventDefault();
-            onOpenTeam(r.team);
-          }}
-          className="flex items-center gap-1.5 transition-colors hover:text-[#17457f]"
-        >
-          <Crest url={r.team.crestUrl} size={18} />
-          <span className="font-semibold">{nameOf(r.team, lang)}</span>
-        </a>
-      </td>
-      <td className="px-1.5 py-1.5 text-center tabular-nums">{r.played ?? "-"}</td>
-      <td className="px-1.5 py-1.5 text-center tabular-nums">{r.win ?? "-"}</td>
-      <td className="px-1.5 py-1.5 text-center tabular-nums">{r.draw ?? "-"}</td>
-      <td className="px-1.5 py-1.5 text-center tabular-nums">{r.lose ?? "-"}</td>
-      <td className="px-1.5 py-1.5 text-center tabular-nums">{r.goalDiff ?? "-"}</td>
-      <td className="px-1.5 py-1.5 text-center font-extrabold tabular-nums text-[#17457f]">
-        {r.points ?? "-"}
-      </td>
-    </tr>
   );
 }
 

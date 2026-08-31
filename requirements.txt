@@ -4,6 +4,3 @@ flask>=3.0
 psycopg[binary]>=3.1
 psycopg-pool>=3.2
 gunicorn>=21.2
-# optional: shared API response cache (enabled by REDIS_URL; without it the
-# package is never even imported and the API runs cache-less as before)
-redis>=5.0

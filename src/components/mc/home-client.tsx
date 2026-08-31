@@ -7,7 +7,6 @@ import type {
   Lang,
   ListingResponse,
   MatchRow,
-  TeamRef,
 } from "@/lib/goal/types";
 import { localToday, t } from "@/lib/i18n";
 import {
@@ -19,21 +18,11 @@ import {
   matchUrlFor,
   pageDescription,
   pageTitle,
-  playerDescription,
-  playerTitle,
-  playerUrlFor,
-  teamDescription,
-  teamTitle,
-  teamUrlFor,
 } from "@/lib/seo";
 import { DateNav } from "@/components/mc/date-nav";
 import { MatchList } from "@/components/mc/match-list";
 import { MatchDialog } from "@/components/mc/match-dialog";
 import { CompetitionDialog } from "@/components/mc/competition-dialog";
-import { TeamDialog } from "@/components/mc/team-dialog";
-import { PlayerDialog, type PlayerDialogTarget } from "@/components/mc/player-dialog";
-import { LiveMatchStream, applyMatchDelta, type LiveStreamStatus } from "@/lib/goal/sse";
-import type { MatchUpdatedDelta, LiveEvent } from "@/lib/goal/types";
 
 // ---------------------------------------------------------------------------
 // auto-refresh cadence: the listing polls at 60s ONLY while live matches are
@@ -52,9 +41,6 @@ const KICKOFF_BUFFER_MS = 90_000;
 const KICKOFF_WATCH_MS = 15 * 60_000;
 /** retry cadence after a failed load - the app heals itself (no button) */
 const ERROR_RETRY_MS = 30_000;
-/** while the SSE stream is delivering live updates the periodic HTTP poll is
- *  only a safety net: 5 minutes instead of every minute */
-const SSE_SAFETY_POLL_MS = 5 * 60_000;
 
 interface HomeClientProps {
   /** day listing fetched on the server (SEO) - null when the backend was slow/unreachable */
@@ -83,11 +69,6 @@ export function HomeClient({
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<MatchRow | null>(null);
   const [compSelected, setCompSelected] = useState<CompetitionRef | null>(null);
-  const [teamSelected, setTeamSelected] = useState<TeamRef | null>(null);
-  const [playerSelected, setPlayerSelected] = useState<PlayerDialogTarget | null>(null);
-  // which of the team/player dialogs stacks on top when both are open
-  // (team opened FROM the player dialog -> "team"; player FROM team -> "player")
-  const [topDialog, setTopDialog] = useState<"team" | "player" | null>(null);
 
   // SSR data seeds the list so crawlers (and users) get real content in the
   // first paint; the client then re-fetches to align with the local timezone
@@ -109,21 +90,11 @@ export function HomeClient({
   const ssrFresh = useRef(!!initialData);
   // whether the user has navigated dates manually (URL sync only after that)
   const userNavigated = useRef(false);
-  // SSE connection state ("connecting" | "open" | "failed") - when the live
-  // stream works, the periodic HTTP poll relaxes to a 5-minute safety net;
-  // when it fails, the 60s live polling takes over automatically
-  const [sseStatus, setSseStatus] = useState<LiveStreamStatus>("connecting");
-  // per-match data_version guard: an out-of-order SSE event (older version
-  // than one already applied) is dropped instead of overwriting fresh state
-  const versionRef = useRef<Record<string, number>>({});
   // true while the browser URL points at a /match/<id> page we pushed from
   // this listing (closing the dialog pops back with history.back())
   const pushedMatchUrl = useRef(false);
   // same for /competition/<id> pages (the competition dialog pushes its URL)
   const pushedCompUrl = useRef(false);
-  // same for /team/<id> and /player/<id> pages (team/player dialogs)
-  const pushedTeamUrl = useRef(false);
-  const pushedPlayerUrl = useRef(false);
 
   // mount: read persisted prefs + local "today" (avoids SSR/CSR mismatch)
   useEffect(() => {
@@ -196,55 +167,28 @@ export function HomeClient({
       ?.setAttribute("content", competitionDescription({ competition: c }, lang));
   }, []);
 
-  /** apply the team page's SEO meta while its URL is showing */
-  const applyTeamMeta = useCallback((team: TeamRef, lang: Lang) => {
-    document.title = teamTitle(team, lang);
-    document
-      .querySelector('meta[name="description"]')
-      ?.setAttribute("content", teamDescription(team, lang));
-  }, []);
-
-  /** apply the player page's SEO meta while its URL is showing */
-  const applyPlayerMeta = useCallback((p: PlayerDialogTarget, lang: Lang) => {
-    document.title = playerTitle(p, lang);
-    document
-      .querySelector('meta[name="description"]')
-      ?.setAttribute("content", playerDescription({ player: p }, lang));
-  }, []);
-
   /** open a match: dialog + shareable/crawlable slug URL + match SEO meta.
    *  The URL uses the CURRENT language's slug (Arabic slug for ar, English
-   *  slug for en) - identical to the server canonical.
-   *  When the team dialog is open on top, the clicked match TAKES ITS PLACE:
-   *  the team dialog closes and its URL entry is REPLACED (same history
-   * depth, no async back()/push() dance). */
+   *  slug for en) - identical to the server canonical. */
   const openMatch = useCallback(
     (m: MatchRow) => {
-      const fromTeamDialog = !!teamSelected;
-      if (fromTeamDialog) {
-        setTeamSelected(null);
-        setTopDialog(null);
-        // the /team/<id> entry is consumed by the replaceState below
-        pushedTeamUrl.current = false;
-      }
       setSelected(m);
       try {
         // soft navigation: the listing stays mounted and the dialog opens on
         // top, but the URL (and everything a crawler sees when it later fetches
         // this URL server-side) becomes the match's own slug page
-        const url = matchUrlFor(m.matchId, m, lang);
-        if (fromTeamDialog) {
-          window.history.replaceState({ mcMatch: m.matchId }, "", url);
-        } else {
-          window.history.pushState({ mcMatch: m.matchId }, "", url);
-        }
+        window.history.pushState(
+          { mcMatch: m.matchId },
+          "",
+          matchUrlFor(m.matchId, m, lang),
+        );
         pushedMatchUrl.current = true;
       } catch {
         /* history unavailable - the dialog still opens, just no URL change */
       }
       applyMatchMeta(m, lang);
     },
-    [applyMatchMeta, lang, teamSelected],
+    [applyMatchMeta, lang],
   );
 
   /** open a competition: dialog + shareable/crawlable slug URL + its meta
@@ -267,74 +211,12 @@ export function HomeClient({
     [applyCompMeta, lang],
   );
 
-  /** open a team: dialog + shareable/crawlable slug URL + its meta (the same
-   *  treatment matches and competitions get). Opened from the match dialog
-   *  header, standings rows, the player dialog's club chip, ...
-   *  When opened FROM the player dialog, the team dialog TAKES THE PLAYER'S
-   *  PLACE (replaceState, same as a match clicked inside the team dialog):
-   *  re-elevating an already-open dialog breaks Radix's Escape layer order
-   *  (one Escape would close both at once). */
-  const openTeam = useCallback(
-    (team: TeamRef) => {
-      if (!team?.id) return;
-      const fromPlayerDialog = !!playerSelected;
-      if (fromPlayerDialog) {
-        setPlayerSelected(null);
-        setTopDialog(null);
-        // the /player/<id> entry is consumed by the replaceState below
-        pushedPlayerUrl.current = false;
-      }
-      setTeamSelected(team);
-      try {
-        const url = teamUrlFor(team.id, team, lang);
-        if (fromPlayerDialog) {
-          window.history.replaceState({ mcTeam: team.id }, "", url);
-        } else {
-          window.history.pushState({ mcTeam: team.id }, "", url);
-        }
-        pushedTeamUrl.current = true;
-      } catch {
-        /* history unavailable - the dialog still opens, just no URL change */
-      }
-      applyTeamMeta(team, lang);
-    },
-    [applyTeamMeta, lang, playerSelected],
-  );
-
-  /** open a player: dialog + slug URL + its meta. Opened from lineups, the
-   *  team dialog's squad list, ... */
-  const openPlayer = useCallback(
-    (p: PlayerDialogTarget) => {
-      if (!p?.id) return;
-      setPlayerSelected(p);
-      // player opened FROM the team dialog -> player stacks on top
-      if (teamSelected) setTopDialog("player");
-      try {
-        window.history.pushState(
-          { mcPlayer: p.id },
-          "",
-          playerUrlFor(p.id, p, lang),
-        );
-        pushedPlayerUrl.current = true;
-      } catch {
-        /* history unavailable - the dialog still opens, just no URL change */
-      }
-      applyPlayerMeta(p, lang);
-    },
-    [applyPlayerMeta, lang, teamSelected],
-  );
-
   /** close the match dialog: pop back to the listing URL + restore its meta.
-   *  Whatever dialog is still open underneath gets ITS meta restored (team /
-   *  player dialogs sit on top of the match dialog, so in practice the match
-   *  is topmost when this fires - the chain is defensive). */
+   *  If the match was opened from the competition dialog (which stays
+   *  underneath), restore THAT dialog's meta instead. */
   const closeMatch = useCallback(() => {
     setSelected(null);
-    if (playerSelected) {
-      applyPlayerMeta(playerSelected, lang);
-    } else if (teamSelected) {
-      applyTeamMeta(teamSelected, lang);
-    } else if (compSelected) {
+    if (compSelected) {
       applyCompMeta(compSelected, lang);
     } else {
       restoreDayMeta(date || today || initialDate, lang);
@@ -347,7 +229,7 @@ export function HomeClient({
         /* ignore */
       }
     }
-  }, [date, today, lang, initialDate, compSelected, playerSelected, teamSelected, applyCompMeta, applyPlayerMeta, applyTeamMeta, restoreDayMeta]);
+  }, [date, today, lang, initialDate, compSelected, applyCompMeta, restoreDayMeta]);
 
   /** close the competition dialog: pop back to the listing URL + restore meta */
   const closeCompetition = useCallback(() => {
@@ -363,84 +245,15 @@ export function HomeClient({
     }
   }, [date, today, lang, initialDate, restoreDayMeta]);
 
-  /** close the team dialog: pop back to the previous URL + restore the meta
-   *  of whatever is open underneath (player / match / competition / listing) */
-  const closeTeam = useCallback(() => {
-    setTeamSelected(null);
-    setTopDialog((top) => (top === "team" ? null : top));
-    if (playerSelected) {
-      applyPlayerMeta(playerSelected, lang);
-    } else if (selected) {
-      applyMatchMeta(selected, lang);
-    } else if (compSelected) {
-      applyCompMeta(compSelected, lang);
-    } else {
-      restoreDayMeta(date || today || initialDate, lang);
-    }
-    if (pushedTeamUrl.current) {
-      pushedTeamUrl.current = false;
-      try {
-        window.history.back();
-      } catch {
-        /* ignore */
-      }
-    }
-  }, [date, today, lang, initialDate, selected, compSelected, playerSelected, applyMatchMeta, applyCompMeta, applyPlayerMeta, restoreDayMeta]);
-
-  /** close the player dialog: pop back + restore the underlying meta */
-  const closePlayer = useCallback(() => {
-    setPlayerSelected(null);
-    setTopDialog((top) => (top === "player" ? null : top));
-    if (teamSelected) {
-      applyTeamMeta(teamSelected, lang);
-    } else if (selected) {
-      applyMatchMeta(selected, lang);
-    } else if (compSelected) {
-      applyCompMeta(compSelected, lang);
-    } else {
-      restoreDayMeta(date || today || initialDate, lang);
-    }
-    if (pushedPlayerUrl.current) {
-      pushedPlayerUrl.current = false;
-      try {
-        window.history.back();
-      } catch {
-        /* ignore */
-      }
-    }
-  }, [date, today, lang, initialDate, selected, compSelected, teamSelected, applyMatchMeta, applyCompMeta, applyTeamMeta, restoreDayMeta]);
-
   /**
    * Switch the UI language AND keep everything a crawler sees consistent:
-   * the TOPMOST open dialog moves to its new-language URL (replaceState) and
-   * its meta switches to the new language's strings.
+   * an open dialog moves to its new-language URL (replaceState) and its
+   * meta switches to the new language's strings.
    */
   const switchLang = useCallback(
     (next: Lang) => {
       setLang(next);
-      if (playerSelected) {
-        try {
-          window.history.replaceState(
-            { mcPlayer: playerSelected.id },
-            "",
-            playerUrlFor(playerSelected.id, playerSelected, next),
-          );
-        } catch {
-          /* ignore */
-        }
-        applyPlayerMeta(playerSelected, next);
-      } else if (teamSelected) {
-        try {
-          window.history.replaceState(
-            { mcTeam: teamSelected.id },
-            "",
-            teamUrlFor(teamSelected.id, teamSelected, next),
-          );
-        } catch {
-          /* ignore */
-        }
-        applyTeamMeta(teamSelected, next);
-      } else if (selected) {
+      if (selected) {
         try {
           window.history.replaceState(
             { mcMatch: selected.matchId },
@@ -464,10 +277,10 @@ export function HomeClient({
         applyCompMeta(compSelected, next);
       }
     },
-    [selected, compSelected, teamSelected, playerSelected, applyMatchMeta, applyCompMeta, applyTeamMeta, applyPlayerMeta],
+    [selected, compSelected, applyMatchMeta, applyCompMeta],
   );
 
-  // browser BACK from a pushed /match|/competition|/team|/player URL: close
+  // browser BACK from a pushed /match/<id> or /competition/<id> URL: close
   // the corresponding dialog + restore the right meta (pushState does not
   // trigger a popstate on its own)
   useEffect(() => {
@@ -475,8 +288,6 @@ export function HomeClient({
       const path = window.location.pathname;
       const onMatchUrl = path.startsWith("/match/");
       const onCompUrl = path.startsWith("/competition/");
-      const onTeamUrl = path.startsWith("/team/");
-      const onPlayerUrl = path.startsWith("/player/");
       if (!onMatchUrl && pushedMatchUrl.current) {
         pushedMatchUrl.current = false;
         setSelected(null);
@@ -485,23 +296,9 @@ export function HomeClient({
         pushedCompUrl.current = false;
         setCompSelected(null);
       }
-      if (!onTeamUrl && pushedTeamUrl.current) {
-        pushedTeamUrl.current = false;
-        setTeamSelected(null);
-      }
-      if (!onPlayerUrl && pushedPlayerUrl.current) {
-        pushedPlayerUrl.current = false;
-        setPlayerSelected(null);
-      }
-      // restore the meta of whatever is now on screen: the topmost dialog
-      // still open (player / team / match / competition) or the day listing
-      if (onPlayerUrl && playerSelected) {
-        applyPlayerMeta(playerSelected, lang);
-      } else if (onTeamUrl && teamSelected) {
-        applyTeamMeta(teamSelected, lang);
-      } else if (onMatchUrl && selected) {
-        applyMatchMeta(selected, lang);
-      } else if (onCompUrl && compSelected) {
+      // restore the meta of whatever is now on screen: the competition (if
+      // its dialog is still open underneath) or the day listing
+      if (onCompUrl && compSelected) {
         applyCompMeta(compSelected, lang);
       } else if (!onMatchUrl) {
         restoreDayMeta(date || today || initialDate, lang);
@@ -509,7 +306,7 @@ export function HomeClient({
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [date, today, lang, initialDate, selected, compSelected, teamSelected, playerSelected, applyMatchMeta, applyCompMeta, applyTeamMeta, applyPlayerMeta, restoreDayMeta]);
+  }, [date, today, lang, initialDate, compSelected, applyCompMeta, restoreDayMeta]);
 
   // shareable/crawlable URLs: reflect the selected day in ?date= (no reload,
   // no re-render - pure history state so crawlers and users get distinct URLs)
@@ -611,17 +408,13 @@ export function HomeClient({
   //  after it so the app switches to live mode the moment a match starts
   //  (a FAILED load is not handled here - the error effect below retries it)
   const autoRefreshMs = useMemo(() => {
-    if (!data || hasLive || startPending) {
-      // SSE is delivering live updates -> the HTTP poll is only a safety
-      // net; SSE failed -> the 60s poll IS the live fallback
-      return sseStatus === "open" ? SSE_SAFETY_POLL_MS : LIVE_POLL_MS;
-    }
+    if (!data || hasLive || startPending) return LIVE_POLL_MS;
     if (nextKickoffMs !== null) {
       const until = nextKickoffMs - Date.now();
       if (until < IDLE_POLL_MS - KICKOFF_BUFFER_MS) return until + KICKOFF_BUFFER_MS;
     }
     return IDLE_POLL_MS;
-  }, [data, hasLive, startPending, nextKickoffMs, sseStatus]);
+  }, [data, hasLive, startPending, nextKickoffMs]);
 
   useEffect(() => {
     if (!isToday || error) return;
@@ -644,46 +437,6 @@ export function HomeClient({
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [isToday, autoRefreshMs, load, error]);
-
-  // ---- LIVE MATCH STREAM (SSE) -----------------------------------------------
-  // On the "today" view, one EventSource delivers match.updated deltas and
-  // ONLY the affected match row is patched - the rest of the page state is
-  // untouched and no re-fetch happens. When the stream fails repeatedly the
-  // existing periodic HTTP refresh above simply stays at its 60s live
-  // cadence (the fallback path), and the status line tells the user.
-  useEffect(() => {
-    if (!isToday || !data) return;
-    const stream = new LiveMatchStream({
-      onEvent: (event: LiveEvent) => {
-        if (event.type !== "match.updated") return; // snapshot/event handled via HTTP + next delta
-        const delta = event as MatchUpdatedDelta;
-        const mid = delta.matchId;
-        const version = delta.version ?? 0;
-        // out-of-order protection: ignore anything older than what we applied
-        if ((versionRef.current[mid] ?? 0) > version) return;
-        versionRef.current[mid] = version;
-        setData((prev) => {
-          if (!prev) return prev;
-          let touched = false;
-          const groups = prev.groups.map((g) => {
-            const idx = g.matches.findIndex((m) => m.matchId === mid);
-            if (idx < 0) return g;
-            touched = true;
-            const matches = [...g.matches];
-            matches[idx] = applyMatchDelta(matches[idx], delta.match);
-            return { ...g, matches };
-          });
-          return touched ? { ...prev, groups } : prev;
-        });
-        setUpdatedAt(new Date());
-      },
-      onStatusChange: (status) => setSseStatus(status),
-    });
-    stream.connect();
-    return () => stream.close();
-    // reconnect when the day listing itself is replaced (date change, filter
-    // change) - data is re-fetched through HTTP first
-  }, [isToday, data?.date, data?.totalMatches === 0]);
 
   // a failed load heals itself - there is no manual refresh button: retry
   // every ERROR_RETRY_MS on any date (not just today) and at once when the
@@ -893,19 +646,7 @@ export function HomeClient({
                   {data.totalMatches} {s.matchesCount}
                   {isToday && (
                     <span className="ms-2 text-[#d31f26]">
-                      {sseStatus === "open" ? (
-                        <>
-                          {/* pulsing dot: live SSE updates are flowing */}
-                          <span className="me-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[#d31f26] align-middle" />
-                          {s.liveOn}
-                        </>
-                      ) : hasLive || startPending ? (
-                        <>
-                          {sseStatus === "failed" ? s.liveFallback : s.autoRefresh}
-                        </>
-                      ) : (
-                        s.autoRefreshIdle
-                      )}
+                      • {hasLive || startPending ? s.autoRefresh : s.autoRefreshIdle}
                     </span>
                   )}
                 </span>
@@ -956,36 +697,10 @@ export function HomeClient({
         lang={lang}
         onClose={closeCompetition}
         onOpenMatch={openMatch}
-        onOpenTeam={openTeam}
       />
 
       {/* ======= match detail dialog ======= */}
-      <MatchDialog
-        match={selected}
-        lang={lang}
-        onClose={closeMatch}
-        onOpenTeam={openTeam}
-        onOpenPlayer={openPlayer}
-      />
-
-      {/* ======= team dialog (results/fixtures + squad) ======= */}
-      <TeamDialog
-        team={teamSelected}
-        lang={lang}
-        onClose={closeTeam}
-        onOpenMatch={openMatch}
-        onOpenPlayer={openPlayer}
-        elevated={topDialog === "team"}
-      />
-
-      {/* ======= player dialog (bio + career) ======= */}
-      <PlayerDialog
-        player={playerSelected}
-        lang={lang}
-        onClose={closePlayer}
-        onOpenTeam={openTeam}
-        elevated={topDialog === "player"}
-      />
+      <MatchDialog match={selected} lang={lang} onClose={closeMatch} />
     </div>
   );
 }
