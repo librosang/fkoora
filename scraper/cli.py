@@ -504,6 +504,43 @@ def add_source_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--db", default=None, help="PostgreSQL URL (default: FOOTBALL_DB_URL env)")
 
 
+def cmd_migrate_types(args) -> None:
+    """Convert TEXT date/timestamp columns to TIMESTAMPTZ/DATE (or back).
+
+    Runs automatically on every start (Database._init_schema / the API's
+    schema ensure) - this command exists for running it EXPLICITLY: around
+    a maintenance window, with --force to null/repair unparseable values,
+    or with --revert to roll the conversion back.
+    """
+    from .db import migrate
+
+    conn = open_db(args).conn
+    try:
+        if args.revert:
+            report = migrate.revert_types(conn)
+            for line in report["reverted"]:
+                print(f"  reverted : {line}")
+            for line in report["failed"]:
+                print(f"  FAILED   : {line}")
+            print(f"{len(report['reverted'])} column(s) reverted to TEXT, "
+                  f"{len(report['failed'])} failure(s)")
+            return
+        report = migrate.migrate_types(conn, force=args.force)
+        for line in report.get("converted", []):
+            print(f"  converted: {line}")
+        for line in report.get("repaired", []):
+            print(f"  repaired : {line}")
+        for line in report["failed"]:
+            print(f"  FAILED   : {line} (rerun with --force if the values "
+                  f"are expendable, or fix them first)")
+        n_native = len(report["already_native"])
+        print(f"\n{len(report['converted'])} converted, {n_native} already "
+              f"native, {len(report['failed'])} failed")
+    finally:
+        conn.rollback()
+        conn.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scraper",
@@ -638,6 +675,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_serve)
 
     # api -----------------------------------------------------------------
+    p = sub.add_parser("migrate-types",
+                       help="convert TEXT date/timestamp columns to TIMESTAMPTZ/DATE")
+    p.add_argument("--force", action="store_true",
+                   help="null out (or repair) unparseable values instead of aborting")
+    p.add_argument("--revert", action="store_true",
+                   help="convert back to the original TEXT format")
+    p.set_defaults(func=cmd_migrate_types)
+
     p = sub.add_parser("api", help="launch the read-only JSON API (frontend data source)")
     p.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
     p.add_argument("--port", type=int, default=9000, help="port (default 9000)")

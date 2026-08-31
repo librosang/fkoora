@@ -13,6 +13,13 @@
 #                        freshness scheduler + refresh_jobs consumer. The
 #                        ONLY process that talks to goal.com. Also runs the
 #                        optional historical bootstrap (BOOTSTRAP_ON_START).
+#   SERVICE_ROLE=migrate ONE-SHOT init container: applies the idempotent
+#                        schema script + the TEXT -> TIMESTAMPTZ/DATE type
+#                        migration, prints a report and EXITS 0. Run it
+#                        before api/worker (docker compose's
+#                        `service_completed_successfully` gate) so both
+#                        start against a fully typed database instead of
+#                        racing each other's ALTERs on a legacy volume.
 #   SERVICE_ROLE=all     legacy single-container mode: background worker
 #                        process + gunicorn foreground (pre-split behavior).
 #
@@ -49,8 +56,11 @@
 # REFRESH_*_SEC / ENRICH_*_SEC / AR_*_SEC / COMP_*_SEC / ON_DEMAND_RETRY_SEC.
 # API tuning (see scraper/api.py): IMG_CACHE_DIR, IMG_MEM_CACHE_MB,
 # DB_POOL_MIN/MAX, COMPETITION_TTL_SEC, API_CRON_SECRET.
-# Shared response cache (see scraper/apicache.py): REDIS_URL (set it on the
-# api AND the worker container - the worker invalidates the API's cache),
+# Shared response cache + live layer (see scraper/apicache.py,
+# scraper/live.py, scraper/sse.py): REDIS_URL (set it on the api AND the
+# worker container - the worker invalidates the API's cache, maintains the
+# fk:live:v1:* hot cache and publishes SSE events), SSE_HEARTBEAT_SEC,
+# SSE_POLL_SEC, LIVE_* knobs, adaptive polling PROVIDER_POLL_*_SECONDS,
 # API_CACHE_TTL_* per-endpoint TTL overrides.
 #
 # Usage:
@@ -68,8 +78,21 @@
 
 set -e
 
+timestamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
 # ---- role ----------------------------------------------------------------
 SERVICE_ROLE="${SERVICE_ROLE:-api}"
+
+# ---- one-shot migration container (init job) -------------------------------
+# Applies schema.sql (CREATE TABLE IF NOT EXISTS ...) + the idempotent
+# TEXT -> TIMESTAMPTZ/DATE conversion, prints a report and exits 0. In the
+# compose files this is the `fkoora-migrate` service that api/worker gate
+# on with `condition: service_completed_successfully`. On an already
+# migrated database it is a fast no-op (a couple of catalog reads).
+if [ "$SERVICE_ROLE" = "migrate" ]; then
+    echo "[$(timestamp)] [entrypoint] one-shot schema + type migration starting"
+    exec python -m scraper.cli migrate-types
+fi
 
 if [ "$SERVICE_ROLE" = "api" ] && [ "${API_ENABLE_SCHEDULER:-1}" != "0" ]; then
     # old deployments expected THIS container to keep the data fresh
@@ -92,10 +115,18 @@ BOOTSTRAP_MARKER_PATH="${BOOTSTRAP_MARKER_PATH:-/app/.bootstrap_complete}"
 
 GUNICORN_BIND="${GUNICORN_BIND:-0.0.0.0:9000}"
 GUNICORN_WORKERS="${GUNICORN_WORKERS:-1}"
-GUNICORN_THREADS="${GUNICORN_THREADS:-8}"
+# SSE (/api/events/live) holds one gthread thread per connected browser,
+# so the default rose 8 -> 32 with the live-update layer. Estimate
+# ~1 thread per concurrent SSE client + headroom for normal requests;
+# for thousands of concurrent SSE clients switch the worker class to
+# gevent (same image: pip install gevent, --worker-class gevent).
+GUNICORN_THREADS="${GUNICORN_THREADS:-32}"
 GUNICORN_TIMEOUT="${GUNICORN_TIMEOUT:-180}"
-
-timestamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+# how long gunicorn waits for in-flight requests (incl. open SSE streams)
+# after SIGTERM before force-killing - keep >= stop_grace_period in compose
+GUNICORN_GRACEFUL_TIMEOUT="${GUNICORN_GRACEFUL_TIMEOUT:-30}"
+GUNICORN_KEEP_ALIVE="${GUNICORN_KEEP_ALIVE:-5}"
+GUNICORN_LOG_LEVEL="${GUNICORN_LOG_LEVEL:-info}"
 
 # ---- optional bootstrap (worker/all roles only) ---------------------------
 if [ "$SERVICE_ROLE" = "api" ]; then
@@ -168,3 +199,24 @@ if [ "$SERVICE_ROLE" = "all" ]; then
 fi
 
 echo "[$(timestamp)] [entrypoint] starting gunicorn on $GUNICORN_BIND (read-only API)"
+
+# scraper/wsgi.py is the gunicorn entry: it builds the app via create_app()
+# (env-driven: FOOTBALL_DB_URL, REDIS_URL, ...) AND configures logging so
+# application logs reach `docker compose logs` alongside gunicorn's access
+# lines. One gthread thread per open SSE stream + regular requests; exec
+# hands over PID 1 so SIGTERM reaches gunicorn directly (graceful: in-flight
+# requests + SSE streams get GUNICORN_GRACEFUL_TIMEOUT seconds to finish
+# before the worker is killed).
+exec gunicorn \
+    --bind "$GUNICORN_BIND" \
+    --workers "$GUNICORN_WORKERS" \
+    --threads "$GUNICORN_THREADS" \
+    --worker-class gthread \
+    --timeout "$GUNICORN_TIMEOUT" \
+    --graceful-timeout "$GUNICORN_GRACEFUL_TIMEOUT" \
+    --keep-alive "$GUNICORN_KEEP_ALIVE" \
+    --worker-tmp-dir /dev/shm \
+    --access-logfile - \
+    --error-logfile - \
+    --log-level "$GUNICORN_LOG_LEVEL" \
+    scraper.wsgi:app

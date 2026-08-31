@@ -18,14 +18,34 @@
 #                    process that talks to goal.com. It also DELs the cache
 #                    keys the moment fresh data lands (so a hit is never a
 #                    stale score). WITHOUT THIS CONTAINER THE DATA GOES STALE.
-#   fkoora-redis     NEW. Dedicated cache instance (256 MB, allkeys-lru,
-#                    nothing on disk) - same pattern as your immich-redis.
-#                    Keeping it dedicated means LRU eviction can never touch
-#                    the keys of your shared `redis` service. Alternative: drop
-#                    this service and set REDIS_URL: redis://redis:6379/0 on
-#                    api + worker (fkoora keys are namespaced fk:api:v1:* and
-#                    all carry TTLs) - but then do NOT set allkeys-lru on the
-#                    shared instance.
+#   fkoora-redis     NEW. Dedicated cache instance (256 MB, nothing on
+#                    disk) - same pattern as your immich-redis.
+#                    ALSO carries the LIVE layer since the Fkoora upgrade:
+#                    the worker maintains fk:live:v1:* (live hot cache +
+#                    event log) and publishes to fk:events:v1:matches; the
+#                    API's /api/events/live SSE endpoint fans those out to
+#                    every browser (one Redis subscription per process).
+#                    The eviction policy is VOLATILE-lru, NOT allkeys-lru:
+#                    volatile-* only evicts keys that carry a TTL (the
+#                    fk:api:v1:* response cache + the fk:live:v1:match:*
+#                    hot keys, all short-lived and cheap to rebuild) and
+#                    NEVER touches the TTL-less fk:live:v1:seq / :log keys
+#                    that SSE Last-Event-ID replay depends on. Keeping it
+#                    dedicated means eviction can never touch the keys of
+#                    your shared `redis` service. Alternative: drop this
+#                    service and set REDIS_URL: redis://redis:6379/0 on
+#                    api + worker (fkoora keys are namespaced fk:api:v1:*
+#                    and all carry TTLs) - but then keep that instance's
+#                    policy non-evicting for TTL-less keys (no allkeys-*).
+#   fkoora-migrate    NEW. One-shot init container from the same image
+#                    (SERVICE_ROLE=migrate): applies the idempotent schema
+#                    and the TEXT -> TIMESTAMPTZ/DATE conversion for legacy
+#                    databases, prints a report, exits 0. api + worker gate
+#                    on it (service_completed_successfully) so they never
+#                    race each other's ALTERs on your existing
+#                    ./postgres-data volume; on an already-migrated
+#                    database it is a seconds-long no-op. Idempotent:
+#                    every `docker compose up` simply re-runs it.
 #   fkoora-postgres  untouched (same ./postgres-data volume - your data
 #                    survives; the two new coordination tables apply
 #                    themselves on first start).
@@ -34,8 +54,17 @@
 #
 # Deploy (rebuild is required - requirements.txt gained the redis package):
 #
-#   docker compose up -d --build fkoora-redis fkoora-api fkoora-worker
-#   docker compose logs -f fkoora-worker    # schema applies, scheduler ticks
+#   docker compose up -d --build fkoora-redis fkoora-migrate \
+#                          fkoora-api fkoora-worker
+#   docker compose logs -f fkoora-migrate    # type conversion report
+#   docker compose logs -f fkoora-worker    # scheduler ticks
+#
+# NOTE - SSE through nginx-proxy-manager: the API and the Next.js proxy both
+# send `X-Accel-Buffering: no` (nginx then streams /api/events/live instead
+# of buffering it) and the stream heartbeats every SSE_HEARTBEAT_SEC (15s),
+# well under nginx's default 60s proxy_read_timeout - no custom NPM config
+# needed. If you raised SSE_HEARTBEAT_SEC above ~50s, also raise
+# proxy_read_timeout in the NPM custom location config.
 #
 # ============================================================================
 
@@ -233,18 +262,23 @@ services:
       timeout: 5s
       retries: 5
 
-  # NEW - dedicated response cache for fkoora (same pattern as immich-redis):
-  # bounded to 256 MB, LRU eviction, nothing persisted. Losing it just means
-  # cache misses rebuild from PostgreSQL. Keep it SEPARATE from the shared
-  # `redis` service above so allkeys-lru can never evict its keys; or delete
-  # this service and point REDIS_URL (on api + worker) at redis://redis:6379/0
-  # instead - fkoora keys are namespaced fk:api:v1:* and all carry TTLs.
+  # NEW - dedicated response cache + live layer for fkoora (same pattern as
+  # immich-redis): bounded to 256 MB, nothing persisted. Losing it just means
+  # cache misses rebuild from PostgreSQL. volatile-lru (NOT allkeys-lru!):
+  # only TTL-carrying keys are evictable - the response cache
+  # (fk:api:v1:*, all TTL'd) and the live hot keys (fk:live:v1:match:*,
+  # TTL 300s, rewritten every sync) - while the TTL-less SSE replay keys
+  # (fk:live:v1:seq + :log) survive memory pressure untouched. Keep it
+  # SEPARATE from the shared `redis` service above so eviction can never
+  # touch its keys; or delete this service and point REDIS_URL (on api +
+  # worker) at redis://redis:6379/0 instead - but then that instance must
+  # not use an allkeys-* policy.
   fkoora-redis:
     image: redis:7-alpine
     container_name: fkoora_redis
     restart: unless-stopped
     command: ["redis-server", "--maxmemory", "256mb",
-              "--maxmemory-policy", "allkeys-lru",
+              "--maxmemory-policy", "volatile-lru",
               "--save", "", "--appendonly", "no"]
     networks:
       - webnet
@@ -254,12 +288,38 @@ services:
       timeout: 5s
       retries: 5
 
+  # NEW - one-shot init container (same image, SERVICE_ROLE=migrate):
+  # applies the idempotent schema + converts legacy TEXT date/timestamp
+  # columns to TIMESTAMPTZ/DATE, prints a report, exits 0. Idempotent and
+  # safe to re-run on every `up`; on a fresh database it only creates the
+  # tables (already native types). api/worker below gate on its clean exit
+  # so they start against a fully typed database instead of racing each
+  # other's ALTERs. `restart: "no"` (quoted - bare no parses as YAML false).
+  fkoora-migrate:
+    build:
+      context: ./fkoora
+      dockerfile: Dockerfile.api
+    container_name: fkoora_migrate
+    restart: "no"
+    environment:
+      SERVICE_ROLE: migrate
+      FOOTBALL_DB_URL: postgresql://fkoora:fuckkoora@fkoora-postgres:5432/fkoora
+      # SCHEMA_LOCK_TIMEOUT_SEC: "10"   # default 5 - raise if the first
+      #                                  # ALTER ever times out behind a
+      #                                  # long-running write lock
+    networks:
+      - webnet
+    depends_on:
+      fkoora-postgres:
+        condition: service_healthy
+
   fkoora-api:
     build:
       context: ./fkoora
       dockerfile: Dockerfile.api
     container_name: fkoora_api
     restart: unless-stopped
+    stop_grace_period: 35s
     environment:
       # READ-ONLY JSON API (gunicorn :9000, internal to webnet only). It
       # serves what the DB has and records data gaps as refresh_jobs rows -
@@ -271,6 +331,11 @@ services:
       # Leave it unset to run cache-less (plain DB reads, still correct).
       REDIS_URL: redis://fkoora-redis:6379/0
       # API_CRON_SECRET: ""        # protects /api/cron/refresh when set
+      # SSE / live tuning (defaults shown, see scraper/sse.py + live.py):
+      # SSE_HEARTBEAT_SEC: "15"    # keep-alive cadence - keep << 60s
+      #                              # (nginx proxy_read_timeout)
+      # GUNICORN_THREADS: "32"     # ~1 thread per concurrent SSE client
+      #                              # + headroom for plain requests
     volumes:
       - ./fkoora/img_cache:/app/img_cache   # crest/logo cache survives restarts
     networks:
@@ -280,6 +345,8 @@ services:
         condition: service_healthy
       fkoora-redis:
         condition: service_healthy
+      fkoora-migrate:
+        condition: service_completed_successfully
 
   # NEW - the scraper worker. Same image as fkoora-api, different role: runs
   # the freshness scheduler + consumes refresh_jobs (the API enqueues them).
@@ -290,12 +357,19 @@ services:
       dockerfile: Dockerfile.api
     container_name: fkoora_worker
     restart: unless-stopped
+    stop_grace_period: 35s
     environment:
       SERVICE_ROLE: worker
       FOOTBALL_DB_URL: postgresql://fkoora:fuckkoora@fkoora-postgres:5432/fkoora
       REDIS_URL: redis://fkoora-redis:6379/0   # invalidates the API cache on write
-      # BOOTSTRAP_ON_START: "0"   # set to "1" for the one-time 10-year walk
-      # SCHEDULER_ROLE: auto      # leader election if you run >1 worker
+      # BOOTSTRAP_ON_START: "1"    # set to "1" for the one-time 10-year walk
+      # SCHEDULER_ROLE: auto       # leader election if you run >1 worker
+      # Adaptive provider polling (recomputed per tick from DB state):
+      # ADAPTIVE_POLL: "1"
+      # PROVIDER_POLL_IDLE_SECONDS: "300"      # nothing live, nothing coming
+      # PROVIDER_POLL_UPCOMING_SECONDS: "120"  # kickoff inside lookahead window
+      # PROVIDER_POLL_LIVE_SECONDS: "60"       # at least one match LIVE
+      # LIVE_TTL_SEC: "300" / LIVE_LOG_MAXLEN: "1000"
     volumes:
       - ./fkoora/img_cache:/app/img_cache     # shared with the API (pre-warm)
     networks:
@@ -305,6 +379,8 @@ services:
         condition: service_healthy
       fkoora-redis:
         condition: service_healthy
+      fkoora-migrate:
+        condition: service_completed_successfully
 
   fkoora-frontend:
     build:
@@ -314,9 +390,11 @@ services:
     restart: unless-stopped
     environment:
       # Container-to-container (server side); the browser only ever talks to
-      # this Next.js server - it proxies every /api/* call to the Flask API.
+      # this Next.js server - it proxies every /api/* call (including the
+      # /api/events/live SSE pass-through) to the Flask API.
       FOOTBALL_API_BASE: http://fkoora_api:9000
       # CRON_SECRET: ""              # must match API_CRON_SECRET when set
+      # SITE_URL: https://fkoora.site # runtime canonical-URL override
     ports:
      - "3000:3000"
     networks:

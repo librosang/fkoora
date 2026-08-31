@@ -11,6 +11,8 @@ Architecture
                        this API  (Flask, default :8000) -----+
                          /api/matches     day listing   (bilingual, grouped)
                          /api/match/<id>  full detail   (events/lineups/stats)
+                         /api/matches/live  live list   (Redis hot cache -> DB)
+                         /api/events/live   SSE stream  (Redis Pub/Sub fan-out)
                          /api/competition/<id> standings + rounds
                          /api/team/<id>   team profile  (results/fixtures/squad)
                          /api/player/<id> player profile (bio + career history)
@@ -52,6 +54,17 @@ worker DELs the affected keys the moment fresh data lands, so TTLs are
 only the safety net; without REDIS_URL the API behaves exactly as
 before (in-process listing cache only). See scraper/apicache.py.
 
+LIVE ENDPOINTS (Fkoora architecture): /api/matches/live serves the live
+    list from the Redis hot cache (built by the worker after every
+    committed scrape) with a PostgreSQL fallback; /api/events/live is an
+    SSE stream driven by ONE Redis Pub/Sub subscription per process
+    (scraper/sse.py) that fans match.updated / match.event envelopes out
+    to every connected browser - with heartbeats, monotonic event ids and
+    Last-Event-ID replay so reconnecting clients catch up. Without
+    REDIS_URL the SSE stream falls back to a single server-side database
+    poll per process; the browser NEVER polls the football provider and
+    no provider URL ever appears in any payload.
+
 Run:
     python -m scraper.cli api --port 8000        (plus, somewhere: worker)
 """
@@ -71,15 +84,23 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg
-from flask import Flask, Response, g, jsonify, request
+from contextlib import contextmanager
+from collections import deque
+
+import queue
+from flask import Flask, Response, g, jsonify, request, stream_with_context
 from urllib.parse import urlsplit
 
 from . import config
 from .db import backend
+from .db import queries
 from .db.database import utcnow
 from . import goal_order
 from . import jobs
 from . import apicache
+from . import live
+from . import sse
+from .timeutil import iso_z, parse_ts
 from .imgcache import (TYPE_BY_EXT as _TYPE_BY_EXT,
                        fetch_image as _fetch_image, img_host_allowed, img_path)
 from .major import is_major_competition
@@ -150,6 +171,18 @@ def _norm_num(v: Any) -> Any:
     return v
 
 
+def _norm_row_ts(payload: Dict[str, Any], *keys: str) -> Dict[str, Any]:
+    """In-place timestamp normalization: datetime -> "...Z" wire string.
+
+    Since the TIMESTAMPTZ migration, PostgreSQL hands us datetime objects;
+    the API's wire format stays the ISO-Z string it always was.
+    """
+    for k in keys:
+        if k in payload:
+            payload[k] = iso_z(payload[k])
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # conditional responses (ETag / If-None-Match)
 # ---------------------------------------------------------------------------
@@ -158,7 +191,12 @@ def _norm_num(v: Any) -> Any:
 # browser polls collapse to 304s instead of re-downloading the body. NOTE:
 # the `refreshing` flag is intentionally NOT excluded - it changes what the
 # client must do (keep polling), so it must bust the tag.
-_ETAG_VOLATILE_KEYS = ("generatedAt",)
+# Timestamps that change on every rebuild even when the content is identical
+# are excluded from the tag, so an unchanged payload keeps its ETag and
+# browser polls collapse to 304s instead of re-downloading the body. NOTE:
+# the `refreshing` flag is intentionally NOT excluded - it changes what the
+# client must do (keep polling), so it must bust the tag.
+_ETAG_VOLATILE_KEYS = ("generatedAt", "syncedAt")
 
 
 def _content_etag(payload: Dict[str, Any]) -> str:
@@ -290,28 +328,7 @@ def _competition_json(conn: psycopg.Connection, cid: str, name_en, name_ar,
     }
 
 
-_LISTING_SQL = """
-SELECT m.id, m.kickoff_utc, m.status, m.period,
-       m.home_score, m.away_score, m.home_agg_score, m.away_agg_score,
-       m.home_red_cards, m.away_red_cards,
-       m.round_name, m.gameset_name, m.gameset_name_ar,
-       m.slug_en, m.slug_ar,
-       v.name_en AS venue_en, v.name_ar AS venue_ar,
-       c.id AS c_id, c.name_en AS c_name_en, c.name_ar AS c_name_ar,
-       c.area_name_en AS c_area_en, c.area_name_ar AS c_area_ar, c.area_code AS c_area_code,
-       c.image_url AS c_image,
-       th.id AS h_id, th.name_en AS h_name_en, th.name_ar AS h_name_ar,
-       th.short_name_en AS h_short, th.code AS h_code, th.crest_url AS h_crest,
-       ta.id AS a_id, ta.name_en AS a_name_en, ta.name_ar AS a_name_ar,
-       ta.short_name_en AS a_short, ta.code AS a_code, ta.crest_url AS a_crest
-FROM matches m
-JOIN competitions c ON c.id = m.competition_id
-JOIN teams th ON th.id = m.home_team_id
-JOIN teams ta ON ta.id = m.away_team_id
-LEFT JOIN venues v ON v.id = m.venue_id
-WHERE m.kickoff_utc >= %(start)s AND m.kickoff_utc < %(end)s
-ORDER BY m.kickoff_utc, m.id
-"""
+_LISTING_SQL = queries.LISTING_SQL
 
 
 def _row_to_team(prefix: str, r) -> Dict[str, Any]:
@@ -332,7 +349,7 @@ def _match_row(conn: psycopg.Connection, r, comp_json: Dict[str, Any]) -> Dict[s
     away["crestUrl"] = img_path(conn, r["a_crest"])
     return {
         "matchId": r["id"],
-        "kickoffUtc": r["kickoff_utc"],
+        "kickoffUtc": iso_z(r["kickoff_utc"]),
         "status": r["status"],
         "period": r["period"],
         "homeTeam": home,
@@ -523,7 +540,7 @@ def build_detail(conn: psycopg.Connection, match_id: str) -> Optional[Dict[str, 
 
     return {
         "matchId": m["id"],
-        "kickoffUtc": m["kickoff_utc"],
+        "kickoffUtc": iso_z(m["kickoff_utc"]),
         "status": m["status"],
         "period": m["period"],
         "homeTeam": home,
@@ -576,24 +593,7 @@ MARKER_AR_NAMES = {
     "CHAMPIONSHIP_PLAYOFF": "ملحق الصعود",
 }
 
-_COMP_MATCH_SQL = """
-SELECT m.id, m.kickoff_utc, m.status, m.period,
-       m.home_score, m.away_score, m.home_agg_score, m.away_agg_score,
-       m.home_red_cards, m.away_red_cards,
-       m.round_name, m.gameset_name, m.gameset_name_ar,
-       m.slug_en, m.slug_ar,
-       v.name_en AS venue_en, v.name_ar AS venue_ar,
-       th.id AS h_id, th.name_en AS h_name_en, th.name_ar AS h_name_ar,
-       th.short_name_en AS h_short, th.code AS h_code, th.crest_url AS h_crest,
-       ta.id AS a_id, ta.name_en AS a_name_en, ta.name_ar AS a_name_ar,
-       ta.short_name_en AS a_short, ta.code AS a_code, ta.crest_url AS a_crest
-FROM matches m
-JOIN teams th ON th.id = m.home_team_id
-JOIN teams ta ON ta.id = m.away_team_id
-LEFT JOIN venues v ON v.id = m.venue_id
-WHERE m.competition_id = %(cid)s {extra}
-ORDER BY m.kickoff_utc, m.id
-"""
+_COMP_MATCH_SQL = queries.COMP_MATCHES_SQL
 
 
 def _gameset_json(r) -> Dict[str, Any]:
@@ -782,27 +782,7 @@ def build_competition_matches(conn: psycopg.Connection, comp_id: str,
 TEAM_RECENT_LIMIT = 8
 TEAM_UPCOMING_LIMIT = 8
 
-_TEAM_MATCH_SQL = """
-SELECT m.id, m.kickoff_utc, m.status, m.period,
-       m.home_score, m.away_score, m.home_agg_score, m.away_agg_score,
-       m.home_red_cards, m.away_red_cards,
-       m.round_name, m.gameset_name, m.gameset_name_ar,
-       m.slug_en, m.slug_ar,
-       v.name_en AS venue_en, v.name_ar AS venue_ar,
-       c.id AS c_id, c.name_en AS c_name_en, c.name_ar AS c_name_ar,
-       c.area_name_en AS c_area_en, c.area_name_ar AS c_area_ar, c.area_code AS c_area_code,
-       c.image_url AS c_image,
-       th.id AS h_id, th.name_en AS h_name_en, th.name_ar AS h_name_ar,
-       th.short_name_en AS h_short, th.code AS h_code, th.crest_url AS h_crest,
-       ta.id AS a_id, ta.name_en AS a_name_en, ta.name_ar AS a_name_ar,
-       ta.short_name_en AS a_short, ta.code AS a_code, ta.crest_url AS a_crest
-FROM matches m
-JOIN competitions c ON c.id = m.competition_id
-JOIN teams th ON th.id = m.home_team_id
-JOIN teams ta ON ta.id = m.away_team_id
-LEFT JOIN venues v ON v.id = m.venue_id
-WHERE (m.home_team_id = %(tid)s OR m.away_team_id = %(tid)s)
-"""
+_TEAM_MATCH_SQL = queries.TEAM_MATCHES_SQL
 
 
 def _team_match_rows(conn: psycopg.Connection, team_id: str,
@@ -1026,11 +1006,8 @@ def _comp_data_stale(row) -> bool:
     now = datetime.now(timezone.utc)
 
     def _fresh(ts) -> bool:
-        if not ts:
-            return False
-        try:
-            parsed = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        except (TypeError, ValueError):
+        parsed = parse_ts(ts)          # handles TEXT and TIMESTAMPTZ eras
+        if parsed is None:
             return False
         return (now - parsed).total_seconds() < COMPETITION_TTL_SEC
 
@@ -1040,10 +1017,43 @@ def _comp_data_stale(row) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# cache stampede protection (single-flight per cache key)
+# ---------------------------------------------------------------------------
+# When a hot key expires, N concurrent requests would all rebuild from
+# PostgreSQL at once. One of them wins the per-key lock; the rest re-check
+# the shared cache inside the lock and serve the freshly stored copy. Locks
+# are pruned so the dict stays bounded (keys are per date/tz - naturally
+# few, but unbounded in theory).
+_sf_locks: "deque" = {}
+_sf_guard = threading.Lock()
+
+
+@contextmanager
+def _singleflight(key: str):
+    with _sf_guard:
+        lock = _sf_locks.setdefault(key, threading.Lock())
+    with lock:
+        yield
+    if len(_sf_locks) > 2048:
+        with _sf_guard:
+            for k in [k for k, l in list(_sf_locks.items()) if not l.locked()][:1024]:
+                _sf_locks.pop(k, None)
+
+
+# ---------------------------------------------------------------------------
 # listing response cache (tiny; the DB read is cheap, this just smooths polls)
 # ---------------------------------------------------------------------------
 _listing_cache: Dict[str, Tuple[float, Dict[str, Any], str]] = {}
 _listing_cache_lock = threading.Lock()
+
+
+# stampede metric: number of times the listing SQL chain actually ran
+# (single-flight should keep this at ONE per cold key even under a burst)
+_BUILD_STATS: Dict[str, int] = {"listingBuilds": 0, "detailBuilds": 0}
+
+
+def build_stats() -> Dict[str, int]:
+    return dict(_BUILD_STATS)
 
 
 def _listing_cached(conn, date, today, major_only, tz_min) -> Tuple[Dict[str, Any], str]:
@@ -1064,6 +1074,7 @@ def _listing_cached(conn, date, today, major_only, tz_min) -> Tuple[Dict[str, An
             hit = _listing_cache.get(key)
             if hit and now - hit[0] < ttl:
                 return hit[1], hit[2]
+    _BUILD_STATS["listingBuilds"] += 1
     listing = build_listing(conn, date, today, major_only, tz_min)
     etag = _content_etag(listing)
     # an EMPTY listing caches with the short TTL even for past/future days:
@@ -1097,10 +1108,14 @@ def create_app(db_url: Optional[str] = None) -> Flask:
     # will surface the real problem anyway).
     def _ensure_schema() -> None:
         from .db.database import SCHEMA_PATH
+        from .db import migrate as _migrate
         try:
             with backend.connection(API_DB_URL, pooled=False) as conn:
                 with open(SCHEMA_PATH, encoding="utf-8") as fh:
                     backend.run_script(conn, fh.read())
+                # TEXT -> TIMESTAMPTZ/DATE conversion for legacy databases
+                # (idempotent - a no-op on already-typed columns)
+                _migrate.migrate_types(conn)
             log.info("schema ensured (refresh_jobs + competition_views ready)")
         except Exception as exc:  # noqa: BLE001
             log.error("schema ensure failed (is the database up?): %s", exc)
@@ -1143,26 +1158,110 @@ def create_app(db_url: Optional[str] = None) -> Flask:
 
         # shared-cache fast path: one Redis GET replaces the SQL chain (the
         # empty-day enqueue below already ran on the miss that filled this
-        # entry, and its retry-window guard would swallow a repeat anyway)
+        # entry, and its retry-window guard would swallow a repeat anyway).
+        # Single-flight: when the key expires, ONE request rebuilds while the
+        # concurrent rest wait on the per-key lock and serve its result.
         key = apicache.k_listing(date, today, major_only, tz_min)
         hit = apicache.get(key)
         if hit is not None:
             return _response_from_cache(hit)
 
-        conn = get_conn()
-        listing, etag = _listing_cached(conn, date, today, major_only, tz_min)
+        with _singleflight(key):
+            hit = apicache.get(key)            # re-check under the lock
+            if hit is not None:
+                return _response_from_cache(hit)
 
-        # Nothing stored for this day yet? Ask the worker to scrape the
-        # covering pages (refresh_jobs row) and serve what we have - the
-        # frontend's live-score poll re-fetches and lands the data a few
-        # seconds later. The enqueue is guarded: a day whose covering pages
-        # were scraped successfully within the retry window is genuinely
-        # empty (mid-summer break), not missing.
-        if listing["totalMatches"] == 0 and _day_needs_scrape(conn, date, tz_min):
-            _enqueue(conn, jobs.KIND_DAY_LISTING, date, payload={"tz": tz_min})
+            conn = get_conn()
+            listing, etag = _listing_cached(conn, date, today, major_only, tz_min)
 
-        return _cache_and_respond(key, listing, _listing_ttl(listing, date, today),
-                                  etag=etag)
+            # Nothing stored for this day yet? Ask the worker to scrape the
+            # covering pages (refresh_jobs row) and serve what we have - the
+            # frontend's live-score poll re-fetches and lands the data a few
+            # seconds later. The enqueue is guarded: a day whose covering pages
+            # were scraped successfully within the retry window is genuinely
+            # empty (mid-summer break), not missing.
+            if listing["totalMatches"] == 0 and _day_needs_scrape(conn, date, tz_min):
+                _enqueue(conn, jobs.KIND_DAY_LISTING, date, payload={"tz": tz_min})
+
+            return _cache_and_respond(key, listing,
+                                      _listing_ttl(listing, date, today),
+                                      etag=etag)
+
+    # ---- GET /api/matches/live ----------------------------------------------
+    #
+    # The live list comes from the Redis hot cache (one GET) and falls back
+    # to PostgreSQL when Redis is unavailable. It NEVER queries the football
+    # provider, and no browser ever talks to anything but our own origin.
+    # Minimal live field set only (no lineups/events/stats) - the live UI
+    # plus a dataVersion for out-of-order event protection.
+    @app.get("/api/matches/live")
+    def api_matches_live():
+        payload = live.get_live(API_DB_URL)
+        # staleness is exposed as INFORMATION (the browser keeps showing the
+        # last known state); a provider hiccup must never read as "no
+        # matches" or as an HTTP error
+        synced = parse_ts(payload.get("syncedAt"))
+        if synced is not None:
+            payload["stale"] = (
+                datetime.now(timezone.utc) - synced).total_seconds() > live.LIVE_STALE_SEC
+        else:
+            payload["stale"] = False
+        return _etag_response(payload)
+
+    # ---- GET /api/events/live (SSE) ------------------------------------------
+    #
+    # text/event-stream of live match updates. ONE Redis Pub/Sub subscription
+    # per process (scraper/sse.py) fans out to every connected browser; with
+    # no Redis a DB poller drives the same stream. Heartbeats keep proxies
+    # from dropping idle connections; `id:` lines + the bounded Redis replay
+    # log implement Last-Event-ID reconnection.
+    @app.get("/api/events/live")
+    def api_events_live():
+        bus = sse.get_bus(API_DB_URL)
+        q = bus.subscribe()
+        last_id_raw = (request.headers.get("Last-Event-ID") or "").strip()
+
+        def _parse_last_id() -> int:
+            try:
+                return int(last_id_raw)
+            except (TypeError, ValueError):
+                return 0
+
+        def _stream():
+            try:
+                # reconnect hint (ms) - EventSource default is 3s, 5s is
+                # gentler on the API after a restart
+                yield "retry: 5000\n\n"
+                # Last-Event-ID replay (Redis mode): re-deliver everything
+                # the client missed from the bounded event log
+                last_id = _parse_last_id()
+                if last_id:
+                    for env in live.replay_after(last_id):
+                        yield sse.format_event(env)
+                # current state so a fresh/reconnected client syncs at once
+                try:
+                    snapshot = sse.snapshot_envelope(
+                        live.get_live(API_DB_URL))
+                    yield sse.format_event(snapshot)
+                except Exception:  # noqa: BLE001 - the stream must survive
+                    pass
+                # the event flow: heartbeat comments on idle, formatted
+                # envelopes on activity
+                while True:
+                    try:
+                        env = q.get(timeout=sse.SSE_HEARTBEAT_SEC)
+                    except queue.Empty:
+                        yield ": heartbeat\n\n"
+                        continue
+                    yield sse.format_event(env)
+            finally:
+                bus.unsubscribe(q)
+
+        resp = Response(stream_with_context(_stream()),
+                        mimetype="text/event-stream")
+        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["X-Accel-Buffering"] = "no"   # nginx: do not buffer SSE
+        return resp
 
     # ---- GET /api/match/<id> ----------------------------------------------
     @app.get("/api/match/<match_id>")
@@ -1178,26 +1277,32 @@ def create_app(db_url: Optional[str] = None) -> Flask:
         if hit is not None:
             return _response_from_cache(hit)
 
-        conn = get_conn()
-        detail = build_detail(conn, match_id)
+        with _singleflight(key):
+            hit = apicache.get(key)            # re-check under the lock
+            if hit is not None:
+                return _response_from_cache(hit)
 
-        # No detail rows yet? Record the gap for the worker (it fetches the
-        # detail pages within a few seconds) and answer with what we have -
-        # the frontend retries a 404 with a short backoff and lands the data.
-        # A THIN detail (row exists, no events/lineups yet for a started or
-        # finished match) carries refreshing=true so the dialog re-fetches
-        # a few seconds later instead of showing empty tabs.
-        thin = (detail is not None and not detail["events"]
-                and not (detail["lineups"]["home"] or detail["lineups"]["away"])
-                and detail["status"] in ("RESULT", "LIVE", "AET", "PEN"))
-        if detail is None or thin:
-            _enqueue(conn, jobs.KIND_MATCH_DETAIL, match_id)
-            if thin:
-                detail = {**detail, "refreshing": True}
+            conn = get_conn()
+            detail = build_detail(conn, match_id)
 
-        if detail is None:
-            return jsonify({"error": "match not found"}), 404
-        return _cache_and_respond(key, detail, _match_ttl(detail))
+            # No detail rows yet? Record the gap for the worker (it fetches
+            # the detail pages within a few seconds) and answer with what we
+            # have - the frontend retries a 404 with a short backoff and
+            # lands the data. A THIN detail (row exists, no events/lineups
+            # yet for a started or finished match) carries refreshing=true
+            # so the dialog re-fetches a few seconds later instead of
+            # showing empty tabs.
+            thin = (detail is not None and not detail["events"]
+                    and not (detail["lineups"]["home"] or detail["lineups"]["away"])
+                    and detail["status"] in ("RESULT", "LIVE", "AET", "PEN"))
+            if detail is None or thin:
+                _enqueue(conn, jobs.KIND_MATCH_DETAIL, match_id)
+                if thin:
+                    detail = {**detail, "refreshing": True}
+
+            if detail is None:
+                return jsonify({"error": "match not found"}), 404
+            return _cache_and_respond(key, detail, _match_ttl(detail))
 
     # ---- GET /api/competition/<id> -----------------------------------------
     @app.get("/api/competition/<comp_id>")
@@ -1432,14 +1537,18 @@ def create_app(db_url: Optional[str] = None) -> Flask:
             counts = {t: conn.execute(f"SELECT COUNT(*) AS n FROM {t}").fetchone()["n"]
                       for t in ("competitions", "teams", "players", "matches",
                                 "match_events", "lineups")}
-            last_runs = [dict(r) for r in conn.execute(
-                """SELECT run_mode, target, status, matches_stored, details_fetched,
-                          finished_at FROM scrape_runs
+            last_runs = [
+                _norm_row_ts(dict(r), "finished_at") for r in conn.execute(
+                    """SELECT run_mode, target, status, matches_stored, details_fetched,
+                              finished_at FROM scrape_runs
                    ORDER BY id DESC LIMIT 10""").fetchall()]
-            latest_match = conn.execute(
-                "SELECT MAX(last_seen_at2) AS v FROM matches").fetchone()["v"]
+            latest_match = iso_z(conn.execute(
+                "SELECT MAX(last_seen_at2) AS v FROM matches").fetchone()["v"])
             pending_jobs = conn.execute(
                 "SELECT COUNT(*) AS n FROM refresh_jobs WHERE done_at IS NULL"
+            ).fetchone()["n"]
+            live_matches = conn.execute(
+                "SELECT COUNT(*) AS n FROM matches WHERE status = 'LIVE'"
             ).fetchone()["n"]
         except psycopg.Error as exc:
             return jsonify({"ok": False, "error": str(exc)}), 500
@@ -1448,6 +1557,11 @@ def create_app(db_url: Optional[str] = None) -> Flask:
             "db": backend.display_dsn(API_DB_URL),
             "role": "api (read-only - scraper worker is a separate process)",
             "cache": apicache.status(),
+            "cacheCounters": apicache.counters(),
+            "builds": build_stats(),
+            "live": live.status(),
+            "liveMatches": live_matches,
+            "sse": sse.status(),
             "counts": counts,
             "latestMatchSeen": latest_match,
             "lastRuns": last_runs,

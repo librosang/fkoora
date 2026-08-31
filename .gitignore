@@ -39,3 +39,6 @@ next-env.d.ts
 /.venv
 /scraper
 /.next
+/postgres-data
+/worker.log
+/bootstrap.log

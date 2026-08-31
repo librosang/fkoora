@@ -10,7 +10,14 @@ crest_cache
 scraper.log
 dev.log
 server.log
+worker.log
+bootstrap.log
 *.zip
 .env
 .env.local
 .vercel
+# bind-mount dirs created by docker-compose.yml at the repo root -
+# a multi-GB postgres data dir must NEVER enter the (frontend) build context
+postgres-data
+mysql
+*.tsbuildinfo

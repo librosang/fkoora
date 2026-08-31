@@ -63,6 +63,7 @@ The scraper picks the right page per date automatically:
 
 | Command | What it does |
 |---|---|
+| `migrate-types [--force] [--revert]` | convert TEXT date/timestamp columns to native TIMESTAMPTZ/DATE (also runs automatically + idempotently on every start; `--revert` rolls back) |
 | `date YYYY-MM-DD [--details]` | scrape one day; `--details` also fetches lineups/events/stats |
 | `backfill --from YYYY-MM-DD --to YYYY-MM-DD [--details]` | historical range; idempotent — safe to re-run after interruptions |
 | `bootstrap [--years-back N] [--days-ahead M] [--no-slow] [--no-details]` | **ONE-TIME slow historical walk** of the last N years + next M days; resumable — see below |
@@ -272,7 +273,42 @@ database:
   in-process one) plus the `refresh_jobs` consumer (data-gap requests from
   the API, picked up within `WORKER_POLL_SEC`, default 4 s). Several
   workers against one database elect a single leader via a PostgreSQL
-  advisory lock.
+  advisory lock. The today-listing cadence is ADAPTIVE
+  (`PROVIDER_POLL_LIVE/UPCOMING/IDLE_SECONDS`, recomputed per tick):
+  60 s while matches are live, 120 s when a kickoff approaches, 300 s on
+  idle nights.
+
+### Live update layer (worker → Redis → SSE → browsers)
+
+PostgreSQL stays the source of truth; Redis (when `REDIS_URL` is set) is a
+derived hot cache + event bus, and SSE is a thin delivery layer:
+
+```
+worker ─ provider poll (adaptive)
+      └─ detect CHANGES (upsert layer compares score/status/period/events;
+         an unchanged provider response never even registers — matches.data_version
+         only bumps on real change)
+      └─ PostgreSQL transaction → COMMIT
+      └─ ONLY THEN: scraper/live.py
+           ├─ refresh fk:live:v1:list (live hot cache)
+           ├─ PUBLISH fk:events:v1:matches (match.updated / match.event
+           │  envelopes with monotonic event ids + versions)
+           └─ append to the bounded replay log (SSE Last-Event-ID catch-up)
+      └─ API process: scraper/sse.py — ONE Redis subscription per process
+           fans the envelopes out to every connected /api/events/live
+           browser stream (heartbeats every SSE_HEARTBEAT_SEC)
+```
+
+* A **rolled-back scrape publishes nothing** (the publisher re-reads the
+  committed state and skips matches whose version never landed).
+* Without `REDIS_URL` everything still works: `/api/matches/live` reads
+  PostgreSQL and the SSE endpoint falls back to ONE server-side DB poll per
+  process (`SSE_POLL_SEC`) — never per-browser queries, never the provider.
+* `/api/matches/live` is the live list (Redis hit = one GET; minimal field
+  set, ETag/304 revalidation).
+* The frontend opens `EventSource('/api/events/live')` on the today view and
+  patches only the affected match; repeated stream failures fall back to
+  the existing 60 s HTTP polling automatically.
 * **`scraper/jobs.py` — the handoff layer** both processes share: the
   `refresh_jobs` queue + `competition_views` (which leagues users open)
   tables. The API writes, the worker reads.

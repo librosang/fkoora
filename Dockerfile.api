@@ -20,6 +20,11 @@
 # Runtime configuration (environment):
 #   SERVICE_ROLE             api (default) - read-only API (gunicorn :9000)
 #                            worker        - scraper worker (python -m scraper.cli worker)
+#                            migrate       - ONE-SHOT init container: applies the
+#                                           idempotent schema + TEXT->TIMESTAMPTZ/DATE
+#                                           migration, prints a report, exits 0
+#                                           (compose gates api/worker on it via
+#                                           service_completed_successfully)
 #                            all           - legacy single container: background
 #                                            worker + gunicorn (pre-split behavior)
 #   FOOTBALL_DB_URL          postgresql://user:pass@host:5432/db   (required)
@@ -84,6 +89,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Only the Python package ships in this image (schema.sql lives inside it).
 COPY scraper/ ./scraper/
 
+# Role-aware healthcheck: HTTP /api/health for api|all, PID-1 process check
+# for worker|migrate (the worker never listens on 9000 - a plain HTTP probe
+# would report it unhealthy forever).
+COPY docker-healthcheck.py /app/docker-healthcheck.py
+
 # Entrypoint that (optionally) launches the bootstrap in the background and
 # then execs gunicorn as PID 1.
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
@@ -95,10 +105,11 @@ EXPOSE 9000
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 
-# Deep healthcheck: /api/health opens a real DB connection and reports counts.
+# Deep healthcheck: for the api role /api/health opens a real DB connection
+# and reports counts; for the worker role it verifies PID 1 is the scraper
+# process (see docker-healthcheck.py).
 # Note: during a fresh bootstrap the DB may be empty for the first few minutes
 # until the first day's listings land - the healthcheck still returns 200 OK
 # as long as the API process responds.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=5 \
-  CMD python -c "import urllib.request,sys; \
-  sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9000/api/health', timeout=4).status == 200 else 1)"
+  CMD ["python", "/app/docker-healthcheck.py"]

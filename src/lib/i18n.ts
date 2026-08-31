@@ -32,6 +32,8 @@ export interface Strings {
   lastUpdate: string;
   autoRefresh: string;
   autoRefreshIdle: string;
+  liveOn: string;
+  liveFallback: string;
   events: string;
   lineups: string;
   stats: string;
@@ -163,6 +165,8 @@ const AR: Strings = {
   lastUpdate: "آخر تحديث",
   autoRefresh: "تحديث تلقائي كل دقيقة",
   autoRefreshIdle: "تحديث تلقائي كل 30 دقيقة",
+  liveOn: "بث مباشر",
+  liveFallback: "تحديث تلقائي (تعذر البث)",
   events: "الأحداث",
   lineups: "التشكيلة",
   stats: "الإحصائيات",
@@ -294,6 +298,8 @@ const EN: Strings = {
   lastUpdate: "Updated",
   autoRefresh: "Auto refresh every minute",
   autoRefreshIdle: "Auto refresh every 30 min",
+  liveOn: "Live updates",
+  liveFallback: "Auto refresh (live stream unavailable)",
   events: "Events",
   lineups: "Lineups",
   stats: "Stats",

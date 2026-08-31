@@ -11,6 +11,21 @@
 --     kickoffs under a neighbouring day).
 --   * match_events / lineups are only populated when match details were
 --     fetched (see matches.detail_fetched_at).
+--   * Date/timestamp columns use the native PostgreSQL types (TIMESTAMPTZ /
+--     DATE) - fresh databases get them directly from this file; EXISTING
+--     databases are converted in place, with value validation, by
+--     scraper/db/migrate.py (run automatically on first start, or manually
+--     via `python -m scraper.cli migrate-types`). `kickoff_utc` remains the
+--     UTC instant; `match_date` remains the UTC calendar date of the kickoff
+--     (NOT the user's local date) - exactly the semantics the TEXT version
+--     had. Application code still WRITES ISO strings (PostgreSQL casts
+--     them) and READS through scraper/timeutil.py, which normalizes both
+--     representations to the API's wire format.
+--   * matches.data_version is a monotonic change counter: every meaningful
+--     client-visible change (score, status, period, red cards, events,
+--     lineups, ...) bumps it by one. The live layer (scraper/live.py)
+--     publishes it with every SSE update so clients can drop out-of-order
+--     events.
 --   * The schema is applied idempotently on every start (CREATE TABLE IF NOT
 --     EXISTS), so a fresh database needs no manual setup step.
 --   * UPGRADES: the file is organised in three passes so that an existing
@@ -20,7 +35,9 @@
 --                appeared in newer versions to pre-existing tables)
 --       pass 3 - CREATE INDEX IF NOT EXISTS (after the columns exist)
 --     This ordering matters: indexes on new columns would fail if they ran
---     before pass 2 on an old database.
+--     before pass 2 on an old database. (TYPE conversions are NOT in here on
+--     purpose - ALTER TYPE rewrites the table on every run - they live in
+--     scraper/db/migrate.py which checks information_schema first.)
 -- ============================================================================
 
 -- ===========================================================================
@@ -38,20 +55,17 @@ CREATE TABLE IF NOT EXISTS competitions (
     area_name_ar  TEXT,
     area_code     TEXT,                 -- "ENG", "WORLD", ...
     image_url     TEXT,
-    first_seen_at TEXT NOT NULL,
-    last_seen_at  TEXT NOT NULL
+    first_seen_at TIMESTAMPTZ NOT NULL,
+    last_seen_at  TIMESTAMPTZ NOT NULL
 );
-
--- ---------------------------------------------------------------------------
--- Seasons
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS seasons (
     id             TEXT PRIMARY KEY,    -- sportfeeds season ID
     competition_id TEXT NOT NULL REFERENCES competitions(id),
     name           TEXT,                -- "2026/2027"
     is_active      INTEGER DEFAULT 0,
-    first_seen_at  TEXT NOT NULL,
-    last_seen_at   TEXT NOT NULL
+    first_seen_at  TIMESTAMPTZ NOT NULL,
+    last_seen_at   TIMESTAMPTZ NOT NULL
 );
 
 -- ---------------------------------------------------------------------------
@@ -64,8 +78,8 @@ CREATE TABLE IF NOT EXISTS teams (
     name_ar       TEXT,
     code          TEXT,                 -- 3-letter code, e.g. "SAB"
     crest_url     TEXT,
-    first_seen_at TEXT NOT NULL,
-    last_seen_at  TEXT NOT NULL
+    first_seen_at TIMESTAMPTZ NOT NULL,
+    last_seen_at  TIMESTAMPTZ NOT NULL
 );
 
 -- ---------------------------------------------------------------------------
@@ -97,9 +111,9 @@ CREATE TABLE IF NOT EXISTS players (
     current_club_id TEXT,                -- sportfeeds team ID
     current_club_name_en TEXT,
     current_club_name_ar TEXT,
-    profile_fetched_at TEXT,             -- when the /player page was last pulled
-    first_seen_at TEXT NOT NULL,
-    last_seen_at  TEXT NOT NULL
+    profile_fetched_at TIMESTAMPTZ,       -- when the /player page was last pulled
+    first_seen_at TIMESTAMPTZ NOT NULL,
+    last_seen_at  TIMESTAMPTZ NOT NULL
 );
 
 -- ---------------------------------------------------------------------------
@@ -150,9 +164,9 @@ CREATE TABLE IF NOT EXISTS matches (
     id               TEXT PRIMARY KEY,  -- sportfeeds match ID
     competition_id   TEXT NOT NULL REFERENCES competitions(id),
     season_id        TEXT REFERENCES seasons(id),
-    kickoff_utc      TEXT NOT NULL,     -- ISO-8601 kickoff time (UTC)
-    match_date       TEXT NOT NULL,     -- UTC date of kickoff (YYYY-MM-DD)
-    listed_date      TEXT,              -- fixtures-page date it was found on
+    kickoff_utc      TIMESTAMPTZ NOT NULL, -- kickoff instant (UTC)
+    match_date       DATE NOT NULL,     -- UTC date of kickoff (YYYY-MM-DD)
+    listed_date      DATE,              -- fixtures-page date it was found on
     status           TEXT NOT NULL,     -- FIXTURE / RESULT / CANCELLED / LIVE ...
     period           TEXT,              -- live period info
     round_name       TEXT,              -- round / stage name (EN)
@@ -185,10 +199,11 @@ CREATE TABLE IF NOT EXISTS matches (
     -- bookkeeping
     slug_en          TEXT,
     slug_ar          TEXT,                -- Arabic link slug (from AR listing)
-    detail_fetched_at TEXT,             -- when lineups/events/stats were pulled
-    last_updated_at  TEXT,              -- source lastUpdatedAt
-    first_seen_at    TEXT NOT NULL,
-    last_seen_at2    TEXT NOT NULL
+    detail_fetched_at TIMESTAMPTZ,       -- when lineups/events/stats were pulled
+    last_updated_at  TIMESTAMPTZ,        -- source lastUpdatedAt
+    data_version     BIGINT NOT NULL DEFAULT 1, -- bumps on every meaningful change
+    first_seen_at    TIMESTAMPTZ NOT NULL,
+    last_seen_at2    TIMESTAMPTZ NOT NULL
 );
 
 -- ---------------------------------------------------------------------------
@@ -263,7 +278,7 @@ CREATE TABLE IF NOT EXISTS team_match_stats (
 CREATE TABLE IF NOT EXISTS image_tokens (
     token      TEXT PRIMARY KEY,     -- HMAC-SHA256(secret, url) prefix
     url        TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TIMESTAMPTZ NOT NULL
 );
 
 -- ---------------------------------------------------------------------------
@@ -290,7 +305,7 @@ CREATE TABLE IF NOT EXISTS standings (
     points          INTEGER,
     form_json       TEXT,                  -- [{"wdl":"WIN","matchId":"..."}]
     markers_json    TEXT,                  -- ["CHAMPIONS_LEAGUE", ...]
-    updated_at      TEXT,
+    updated_at      TIMESTAMPTZ,
     UNIQUE(competition_id, season_id, stage, table_name, position)
 );
 
@@ -331,8 +346,8 @@ CREATE TABLE IF NOT EXISTS competition_scrapes (
     competition_id  TEXT PRIMARY KEY REFERENCES competitions(id),
     season_id       TEXT,
     has_standings   INTEGER DEFAULT 1,
-    standings_at    TEXT,
-    matches_at      TEXT
+    standings_at    TIMESTAMPTZ,
+    matches_at      TIMESTAMPTZ
 );
 
 -- ---------------------------------------------------------------------------
@@ -363,9 +378,9 @@ CREATE TABLE IF NOT EXISTS refresh_jobs (
     kind          TEXT NOT NULL,
     ref           TEXT NOT NULL,
     payload       TEXT,                          -- optional JSON args ({"tz": 60})
-    requested_at  TEXT NOT NULL,                 -- utcnow() string, same as everywhere
+    requested_at  TIMESTAMPTZ NOT NULL,
     attempts      INTEGER NOT NULL DEFAULT 0,
-    done_at       TEXT,                          -- NULL = pending
+    done_at       TIMESTAMPTZ,                   -- NULL = pending
     error         TEXT,
     UNIQUE (kind, ref)
 );
@@ -381,7 +396,7 @@ CREATE INDEX IF NOT EXISTS refresh_jobs_pending_idx
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS competition_views (
     competition_id  TEXT PRIMARY KEY,
-    last_viewed_at  TEXT NOT NULL,               -- utcnow() string
+    last_viewed_at  TIMESTAMPTZ NOT NULL,
     view_count      BIGINT NOT NULL DEFAULT 1
 );
 
@@ -399,8 +414,8 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
     matches_stored      INTEGER DEFAULT 0,
     details_fetched     INTEGER DEFAULT 0,
     error               TEXT,
-    started_at          TEXT,
-    finished_at         TEXT
+    started_at          TIMESTAMPTZ,
+    finished_at         TIMESTAMPTZ
 );
 
 -- ===========================================================================
@@ -573,6 +588,9 @@ ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS matches_stored     INTEGER DEFA
 ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS details_fetched    INTEGER DEFAULT 0;
 ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS error              TEXT;
 ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS started_at         TEXT;
+-- match change counter (bumped by the upsert layer on meaningful changes;
+-- see scraper/db/database.py - drives SSE event versioning)
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS data_version BIGINT NOT NULL DEFAULT 1;
 ALTER TABLE scrape_runs ADD COLUMN IF NOT EXISTS finished_at        TEXT;
 
 -- ===========================================================================
@@ -603,3 +621,42 @@ CREATE INDEX IF NOT EXISTS idx_events_type            ON match_events(event_type
 CREATE INDEX IF NOT EXISTS idx_lineups_player         ON lineups(player_id);
 CREATE INDEX IF NOT EXISTS idx_lineups_team           ON lineups(team_id);
 CREATE INDEX IF NOT EXISTS idx_standings_comp         ON standings(competition_id, season_id, stage);
+
+-- ---------------------------------------------------------------------------
+-- Query-path indexes (Fkoora live-data architecture). Every index below
+-- corresponds to an actual API query pattern - nothing speculative:
+--   * idx_matches_date_kickoff            - daily fixtures page:
+--       WHERE match_date = $1 ORDER BY kickoff_utc
+--   * idx_matches_competition_date_kickoff - competition/day listing:
+--       WHERE competition_id = $1 AND match_date = $2 ORDER BY kickoff_utc
+--   * idx_matches_live (PARTIAL)          - the live query:
+--       WHERE status = 'LIVE' ORDER BY kickoff_utc  (status vocabulary is
+--       FIXTURE / LIVE / RESULT / AET / PEN / CANCELLED - 'LIVE' is the
+--       exact live marker the provider uses)
+--   * idx_matches_upcoming (PARTIAL)      - fixtures about to kick off:
+--       WHERE status = 'FIXTURE' (the provider's only upcoming status)
+--   * idx_matches_home/away_team_kickoff  - team pages: recent results and
+--       upcoming fixtures per team
+--   * idx_match_events_match_sort         - match detail: events already
+--       ordered for the details dialog
+-- lineups (match_id, team_id) is already covered by the lineups PRIMARY KEY
+-- (match_id, team_id, player_id) prefix; standings reads are covered by the
+-- UNIQUE(competition_id, season_id, stage, table_name, position) constraint
+-- index - deliberately NOT duplicated here.
+-- ---------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_matches_date_kickoff
+    ON matches (match_date, kickoff_utc);
+CREATE INDEX IF NOT EXISTS idx_matches_competition_date_kickoff
+    ON matches (competition_id, match_date, kickoff_utc);
+CREATE INDEX IF NOT EXISTS idx_matches_live
+    ON matches (kickoff_utc, competition_id)
+    WHERE status = 'LIVE';
+CREATE INDEX IF NOT EXISTS idx_matches_upcoming
+    ON matches (match_date, kickoff_utc, competition_id)
+    WHERE status = 'FIXTURE';
+CREATE INDEX IF NOT EXISTS idx_matches_home_team_kickoff
+    ON matches (home_team_id, kickoff_utc DESC);
+CREATE INDEX IF NOT EXISTS idx_matches_away_team_kickoff
+    ON matches (away_team_id, kickoff_utc DESC);
+CREATE INDEX IF NOT EXISTS idx_match_events_match_sort
+    ON match_events (match_id, sort_order);

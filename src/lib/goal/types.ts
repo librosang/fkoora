@@ -285,3 +285,88 @@ export interface PlayerDetail {
   profileFetched?: boolean;
   generatedAt?: string;
 }
+
+// ---------------------------------------------------------------------------
+// live layer (Fkoora): GET /api/matches/live + GET /api/events/live (SSE)
+// ---------------------------------------------------------------------------
+/** Minimal live-match summary - the field set the live UI needs. */
+export interface LiveMatchSummary {
+  matchId: string;
+  kickoffUtc: string | null;
+  status: string;
+  period?: string | null;
+  competition: {
+    id: string;
+    nameEn?: string | null;
+    nameAr?: string | null;
+    areaNameEn?: string | null;
+  };
+  homeTeam: { id: string; nameEn?: string | null; nameAr?: string | null };
+  awayTeam: { id: string; nameEn?: string | null; nameAr?: string | null };
+  homeScore: number | null;
+  awayScore: number | null;
+  homeAggScore?: number | null;
+  awayAggScore?: number | null;
+  homeRedCards: number;
+  awayRedCards: number;
+  /** monotonic change counter - clients drop out-of-order events */
+  dataVersion?: number;
+  lastUpdatedAt?: string | null;
+}
+
+/** GET /api/matches/live */
+export interface LiveMatchesResponse {
+  matches: LiveMatchSummary[];
+  count: number;
+  syncedAt: string | null;
+  generatedAt?: string | null;
+  /** informational: the worker has not synced within LIVE_STALE_SEC */
+  stale?: boolean;
+}
+
+/** Delta of a changed match carried by `match.updated` SSE events. */
+export interface MatchUpdatedDelta {
+  type: "match.updated";
+  eventId: string;
+  matchId: string;
+  version: number;
+  occurredAt: string;
+  match: LiveMatchSummary;
+}
+
+/** A newly observed match event (goal / card / sub) - `match.event`. */
+export interface MatchEventDelta {
+  type: "match.event";
+  eventId: string;
+  matchId: string;
+  version: number;
+  occurredAt: string;
+  event: {
+    eventType: string;
+    minute: number | null;
+    extraMinute?: number | null;
+    teamSide: "home" | "away" | null;
+    playerId?: string | null;
+    playerNameEn?: string | null;
+    playerNameAr?: string | null;
+    homeScoreAfter?: number | null;
+    awayScoreAfter?: number | null;
+    outcome?: string | null;
+    decision?: string | null;
+  };
+}
+
+/** Initial state on SSE connect. */
+export interface LiveSnapshotEvent {
+  type: "live.snapshot";
+  eventId: string;
+  occurredAt: string | null;
+  matches: LiveMatchSummary[];
+  count: number;
+  syncedAt?: string | null;
+}
+
+export type LiveEvent =
+  | MatchUpdatedDelta
+  | MatchEventDelta
+  | LiveSnapshotEvent;

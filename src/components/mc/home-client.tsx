@@ -32,6 +32,8 @@ import { MatchDialog } from "@/components/mc/match-dialog";
 import { CompetitionDialog } from "@/components/mc/competition-dialog";
 import { TeamDialog } from "@/components/mc/team-dialog";
 import { PlayerDialog, type PlayerDialogTarget } from "@/components/mc/player-dialog";
+import { LiveMatchStream, applyMatchDelta, type LiveStreamStatus } from "@/lib/goal/sse";
+import type { MatchUpdatedDelta, LiveEvent } from "@/lib/goal/types";
 
 // ---------------------------------------------------------------------------
 // auto-refresh cadence: the listing polls at 60s ONLY while live matches are
@@ -50,6 +52,9 @@ const KICKOFF_BUFFER_MS = 90_000;
 const KICKOFF_WATCH_MS = 15 * 60_000;
 /** retry cadence after a failed load - the app heals itself (no button) */
 const ERROR_RETRY_MS = 30_000;
+/** while the SSE stream is delivering live updates the periodic HTTP poll is
+ *  only a safety net: 5 minutes instead of every minute */
+const SSE_SAFETY_POLL_MS = 5 * 60_000;
 
 interface HomeClientProps {
   /** day listing fetched on the server (SEO) - null when the backend was slow/unreachable */
@@ -104,6 +109,13 @@ export function HomeClient({
   const ssrFresh = useRef(!!initialData);
   // whether the user has navigated dates manually (URL sync only after that)
   const userNavigated = useRef(false);
+  // SSE connection state ("connecting" | "open" | "failed") - when the live
+  // stream works, the periodic HTTP poll relaxes to a 5-minute safety net;
+  // when it fails, the 60s live polling takes over automatically
+  const [sseStatus, setSseStatus] = useState<LiveStreamStatus>("connecting");
+  // per-match data_version guard: an out-of-order SSE event (older version
+  // than one already applied) is dropped instead of overwriting fresh state
+  const versionRef = useRef<Record<string, number>>({});
   // true while the browser URL points at a /match/<id> page we pushed from
   // this listing (closing the dialog pops back with history.back())
   const pushedMatchUrl = useRef(false);
@@ -599,13 +611,17 @@ export function HomeClient({
   //  after it so the app switches to live mode the moment a match starts
   //  (a FAILED load is not handled here - the error effect below retries it)
   const autoRefreshMs = useMemo(() => {
-    if (!data || hasLive || startPending) return LIVE_POLL_MS;
+    if (!data || hasLive || startPending) {
+      // SSE is delivering live updates -> the HTTP poll is only a safety
+      // net; SSE failed -> the 60s poll IS the live fallback
+      return sseStatus === "open" ? SSE_SAFETY_POLL_MS : LIVE_POLL_MS;
+    }
     if (nextKickoffMs !== null) {
       const until = nextKickoffMs - Date.now();
       if (until < IDLE_POLL_MS - KICKOFF_BUFFER_MS) return until + KICKOFF_BUFFER_MS;
     }
     return IDLE_POLL_MS;
-  }, [data, hasLive, startPending, nextKickoffMs]);
+  }, [data, hasLive, startPending, nextKickoffMs, sseStatus]);
 
   useEffect(() => {
     if (!isToday || error) return;
@@ -628,6 +644,46 @@ export function HomeClient({
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [isToday, autoRefreshMs, load, error]);
+
+  // ---- LIVE MATCH STREAM (SSE) -----------------------------------------------
+  // On the "today" view, one EventSource delivers match.updated deltas and
+  // ONLY the affected match row is patched - the rest of the page state is
+  // untouched and no re-fetch happens. When the stream fails repeatedly the
+  // existing periodic HTTP refresh above simply stays at its 60s live
+  // cadence (the fallback path), and the status line tells the user.
+  useEffect(() => {
+    if (!isToday || !data) return;
+    const stream = new LiveMatchStream({
+      onEvent: (event: LiveEvent) => {
+        if (event.type !== "match.updated") return; // snapshot/event handled via HTTP + next delta
+        const delta = event as MatchUpdatedDelta;
+        const mid = delta.matchId;
+        const version = delta.version ?? 0;
+        // out-of-order protection: ignore anything older than what we applied
+        if ((versionRef.current[mid] ?? 0) > version) return;
+        versionRef.current[mid] = version;
+        setData((prev) => {
+          if (!prev) return prev;
+          let touched = false;
+          const groups = prev.groups.map((g) => {
+            const idx = g.matches.findIndex((m) => m.matchId === mid);
+            if (idx < 0) return g;
+            touched = true;
+            const matches = [...g.matches];
+            matches[idx] = applyMatchDelta(matches[idx], delta.match);
+            return { ...g, matches };
+          });
+          return touched ? { ...prev, groups } : prev;
+        });
+        setUpdatedAt(new Date());
+      },
+      onStatusChange: (status) => setSseStatus(status),
+    });
+    stream.connect();
+    return () => stream.close();
+    // reconnect when the day listing itself is replaced (date change, filter
+    // change) - data is re-fetched through HTTP first
+  }, [isToday, data?.date, data?.totalMatches === 0]);
 
   // a failed load heals itself - there is no manual refresh button: retry
   // every ERROR_RETRY_MS on any date (not just today) and at once when the
@@ -837,7 +893,19 @@ export function HomeClient({
                   {data.totalMatches} {s.matchesCount}
                   {isToday && (
                     <span className="ms-2 text-[#d31f26]">
-                      • {hasLive || startPending ? s.autoRefresh : s.autoRefreshIdle}
+                      {sseStatus === "open" ? (
+                        <>
+                          {/* pulsing dot: live SSE updates are flowing */}
+                          <span className="me-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[#d31f26] align-middle" />
+                          {s.liveOn}
+                        </>
+                      ) : hasLive || startPending ? (
+                        <>
+                          {sseStatus === "failed" ? s.liveFallback : s.autoRefresh}
+                        </>
+                      ) : (
+                        s.autoRefreshIdle
+                      )}
                     </span>
                   )}
                 </span>

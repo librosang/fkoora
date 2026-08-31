@@ -43,7 +43,7 @@ export interface ConditionalResult<T> {
   error: string | null;
 }
 
-async function getConditional<T>(
+export async function getConditional<T>(
   path: string,
   ifNoneMatch?: string | null,
 ): Promise<ConditionalResult<T>> {
