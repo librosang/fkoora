@@ -89,8 +89,8 @@ export function pageTitle(date: string, today: string, lang: Lang): string {
   const d = formatDateTitle(date, lang);
   if (date === today) {
     return lang === "ar"
-      ? `مباريات اليوم ${d} — النتائج المباشرة والمواعيد | فكوورة`
-      : `Today's Football Matches, ${d} — Live Scores & Fixtures | Fkoora`;
+      ? `مباريات اليوم — النتائج المباشرة والمواعيد | فكوورة`
+      : `Today's Football Matches — Live Scores & Fixtures | Fkoora`;
   }
   const past = date < today;
   if (lang === "ar") {
