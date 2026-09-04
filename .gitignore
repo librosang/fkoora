@@ -38,3 +38,7 @@ next-env.d.ts
 /examples
 /.venv
 /.next
+
+# python
+__pycache__/
+*.py[cod]
