@@ -4,10 +4,9 @@ import {
   competitionChunkCount,
   matchChunkCount,
   sitemapIndexXml,
-  windowMonths,
   XML_HEADERS,
 } from "@/lib/sitemap-xml";
-import { siteUrl, utcToday } from "@/lib/seo";
+import { siteUrl } from "@/lib/seo";
 
 /**
  * /sitemap.xml - sitemap INDEX.
@@ -29,14 +28,9 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const base = siteUrl();
   const now = new Date().toISOString();
-  const today = utcToday();
 
   const items = [
     { loc: `${base}/sitemaps/main.xml`, lastmod: now },
-    ...windowMonths(today).map((month) => ({
-      loc: `${base}/sitemaps/days-${month}.xml`,
-      lastmod: now,
-    })),
   ];
 
   // match sitemaps: one entry per 500-URL chunk (at least one, so crawlers
