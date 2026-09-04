@@ -41,30 +41,34 @@ export function CompetitionDialog({
   onOpenMatch,
 }: CompetitionDialogProps) {
   const s = t(lang);
-  const [open, setOpen] = useState(false);
+  const compId = competition?.id ?? null;
+  const [prevCompId, setPrevCompId] = useState<string | null>(null);
+
   const [info, setInfo] = useState<CompetitionInfo | null>(null);
   const [error, setError] = useState(false);
-  // which competition the error belongs to (an error from a previous
-  // competition must never flash when opening a different one)
   const [errorFor, setErrorFor] = useState<string | null>(null);
 
-  // selected round (gameSetTypeId) + its matches
   const [round, setRound] = useState<CompetitionMatchesResponse | null>(null);
   const [roundLoading, setRoundLoading] = useState(false);
   const [roundError, setRoundError] = useState(false);
   const [gamesetId, setGamesetId] = useState<string | null>(null);
+
+  // Reset state during render when opening a different competition
+  if (compId !== prevCompId) {
+    setPrevCompId(compId);
+    setInfo(null);
+    setRound(null);
+    setGamesetId(null);
+    setError(false);
+    setErrorFor(null);
+    setRoundError(false);
+    setRoundLoading(false);
+  }
+
+  const open = Boolean(competition);
   const roundReqId = useRef(0);
-  // stale-while-revalidate re-fetch budget: responses served while a
-  // background refresh runs carry refreshing=true; we quietly re-fetch a
-  // few seconds later so the fresh standings/matches appear on their own
-  // (bounded - a failing upstream can never turn this into a poll loop)
   const refreshChain = useRef(0);
 
-  const compId = competition?.id ?? null;
-
-  // Only use data that belongs to the competition currently open - the state
-  // briefly still holds the PREVIOUS competition's info/round after
-  // switching, which would flash its standings under the new header.
   const currentInfo = info && info.competition.id === compId ? info : null;
   const currentRound =
     round && round.competition.id === compId ? round : null;
@@ -89,18 +93,11 @@ export function CompetitionDialog({
   }, [compId]);
 
   useEffect(() => {
-    if (competition) {
-      setOpen(true);
-      setInfo(null);
-      setRound(null);
-      setGamesetId(null);
-      setRoundError(false);
+    if (compId) {
       refreshChain.current = 0;
       loadInfo();
-    } else {
-      setOpen(false);
     }
-  }, [competition, loadInfo]);
+  }, [compId, loadInfo]);
 
   // ---- load one round's matches ---------------------------------------------
   const loadRound = useCallback(

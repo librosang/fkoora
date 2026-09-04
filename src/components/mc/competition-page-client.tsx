@@ -88,15 +88,6 @@ export function CompetitionPageClient({
     };
   }, [info, competitionId]);
 
-  // when the info arrives late (client fallback), load its active round too
-  useEffect(() => {
-    if (!info || initialRound || round) return;
-    const gameset = activeGameset(info);
-    if (!gameset) return;
-    selectRound(gameset);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [info]);
-
   /** fetch one round's matches (client-side round switcher) */
   const selectRound = useCallback(
     async (g: GamesetRef) => {
@@ -120,6 +111,14 @@ export function CompetitionPageClient({
     },
     [competitionId],
   );
+
+  // when the info arrives late (client fallback), load its active round too
+  useEffect(() => {
+    if (!info || initialRound || round) return;
+    const gameset = activeGameset(info);
+    if (!gameset) return;
+    selectRound(gameset);
+  }, [info, initialRound, round, selectRound]);
 
   /** apply the match page's SEO meta while its URL is showing */
   const applyMatchMeta = useCallback((m: MatchRow, lang: Lang) => {

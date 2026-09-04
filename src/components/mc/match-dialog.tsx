@@ -41,13 +41,23 @@ export function MatchDialog({
   openOverride,
 }: MatchDialogProps) {
   const s = t(lang);
-  const [open, setOpen] = useState(false);
-  const [detail, setDetail] = useState<MatchDetail | null>(null);
+  const matchId = match?.matchId ?? null;
+  const [prevMatchId, setPrevMatchId] = useState<string | null>(null);
+
+  const [detail, setDetail] = useState<MatchDetail | null>(
+    initialDetail && initialDetail.matchId === matchId ? initialDetail : null,
+  );
   const [error, setError] = useState(false);
 
-  // Only use the detail when it belongs to the match currently open - the
-  // state briefly still holds the PREVIOUS match's detail after switching,
-  // which would flash its events/lineups under the new match's header.
+  if (matchId !== prevMatchId) {
+    setPrevMatchId(matchId);
+    setDetail(initialDetail && initialDetail.matchId === matchId ? initialDetail : null);
+    setError(false);
+  }
+
+  const isOpen = openOverride !== undefined ? openOverride : Boolean(match);
+
+  // Only use the detail when it belongs to the match currently open
   const currentDetail =
     detail && match && detail.matchId === match.matchId ? detail : null;
 
@@ -66,27 +76,12 @@ export function MatchDialog({
     }
   }, [match]);
 
-  // data effect: seed from SSR detail when it belongs to this match (no
-  // client fetch needed), otherwise fetch as before
+  // fetch match details if missing
   useEffect(() => {
-    if (!match) return;
-    if (initialDetail && initialDetail.matchId === match.matchId) {
-      setDetail(initialDetail);
-      return;
+    if (match && (!initialDetail || initialDetail.matchId !== match.matchId)) {
+      load();
     }
-    setDetail(null);
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [match, load, initialDetail]);
-
-  // open-state effect: skipped entirely when the parent controls the dialog
-  // (openOverride defined) - it then opens/closes with the prop alone
-  useEffect(() => {
-    if (openOverride !== undefined) return;
-    setOpen(!!match);
-  }, [openOverride, match]);
-
-  const isOpen = openOverride !== undefined ? openOverride : open;
 
   const home = currentDetail?.homeTeam || match?.homeTeam;
   const away = currentDetail?.awayTeam || match?.awayTeam;

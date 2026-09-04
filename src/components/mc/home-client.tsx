@@ -108,9 +108,6 @@ export function HomeClient({
     } catch {
       /* localStorage unavailable */
     }
-    // no ?date= in the URL and the user's local day differs from the
-    // server-rendered (UTC) day -> switch to the local day, like the app
-    // did before SSR existed
     if (!initialDateFromUrl && local && local !== initialDate) {
       ssrFresh.current = false;
       setDate(local);
