@@ -13,8 +13,6 @@ Page types per date:
   * past dates   -> /results/{date}        (finished matches)
   * today        -> /live-scores           (no date parameter)
   * future dates -> /fixtures/{date}       (upcoming)
-
-kooora.com is kept as an OPTIONAL Arabic fallback (--kooora flag).
 """
 
 from pathlib import Path
@@ -54,15 +52,6 @@ GOAL_AR_MATCH_URL = GOAL_BASE + "/ar/" + quote("المباراة") + "/{slug}/{m
 # goals + season + competition).
 GOAL_PLAYER_URL = GOAL_BASE + "/en/player/{slug}/{player_id}"
 GOAL_AR_PLAYER_URL = GOAL_BASE + "/ar/" + quote("اللاعب") + "/{slug}/{player_id}"
-
-# ---------------------------------------------------------------------------
-# Source URLs - kooora.com (optional Arabic fallback only)
-# ---------------------------------------------------------------------------
-KOOORA_BASE = "https://www.kooora.com"
-KOOORA_FIXTURES_URL = (
-    KOOORA_BASE + "/%D9%83%D8%B1%D8%A9-%D8%A7%D9%84%D9%82%D8%AF%D9%85"
-    "/%D9%85%D9%88%D8%A7%D8%B9%D9%8A%D8%AF-%D8%A7%D9%84%D9%85%D8%A8%D8%A7%D8%B1%D9%8A%D8%A7%D8%AA/{date}"
-)
 
 # ---------------------------------------------------------------------------
 # HTTP behaviour

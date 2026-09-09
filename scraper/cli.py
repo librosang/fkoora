@@ -59,7 +59,7 @@ import argparse
 import logging
 import sys
 from datetime import date as date_cls, datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Optional, Callable
 
 from . import config
 from .db import backend
@@ -90,7 +90,7 @@ def date_range(start: str, end: str):
         d0 += timedelta(days=1)
 
 
-def build_filter(args) -> Optional:
+def build_filter(args) -> Optional[Callable]:
     if getattr(args, "all", False):
         return None
     if getattr(args, "leagues", None):
@@ -119,8 +119,7 @@ def setup_logging(verbose: bool) -> None:
 def cmd_date(args) -> None:
     db = open_db(args)
     try:
-        n = scrape_date_listings(db, args.date, arabic=not args.no_arabic,
-                                 kooora=args.kooora)
+        n = scrape_date_listings(db, args.date, arabic=not args.no_arabic)
         print(f"[{args.date}] {n} matches stored (goal.com EN + AR listings)")
         if args.details:
             comp_filter = build_filter(args)
@@ -142,8 +141,7 @@ def cmd_backfill(args) -> None:
     try:
         for i, d in enumerate(dates, 1):
             try:
-                total += scrape_date_listings(db, d, arabic=not args.no_arabic,
-                                              kooora=args.kooora)
+                total += scrape_date_listings(db, d, arabic=not args.no_arabic)
             except Exception as exc:  # noqa: BLE001
                 log.error("day %s failed: %s", d, exc)
                 continue
@@ -196,7 +194,6 @@ def cmd_bootstrap(args) -> None:
             players=not args.no_players,
             slow=not args.no_slow,
             arabic=not args.no_arabic,
-            kooora=args.kooora,
             competition_filter=comp_filter,
             # add_filter_args() defaults max_details to None; for bootstrap we
             # want a sensible per-day cap so a single dense match day doesn't
@@ -284,8 +281,7 @@ def cmd_upcoming(args) -> None:
     try:
         for d in dates:
             try:
-                total += scrape_date_listings(db, d, arabic=not args.no_arabic,
-                                              kooora=args.kooora)
+                total += scrape_date_listings(db, d, arabic=not args.no_arabic)
             except Exception as exc:  # noqa: BLE001
                 log.error("day %s failed: %s", d, exc)
         print(f"upcoming: {total} fixtures stored across {len(dates)} days")
@@ -394,7 +390,7 @@ def cmd_refresh(args) -> None:
     try:
         for d in dates:
             try:
-                scrape_date_listings(db, d, arabic=not args.no_arabic, kooora=args.kooora)
+                scrape_date_listings(db, d, arabic=not args.no_arabic)
             except Exception as exc:  # noqa: BLE001
                 log.error("day %s failed: %s", d, exc)
         # live matches: refresh details so dialogs stay current
@@ -485,8 +481,6 @@ def add_filter_args(p: argparse.ArgumentParser) -> None:
 def add_source_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-arabic", action="store_true",
                    help="skip goal.com Arabic pages (English names only)")
-    p.add_argument("--kooora", action="store_true",
-                   help="additionally merge kooora.com as an Arabic fallback")
     p.add_argument("--db", default=None, help="PostgreSQL URL (default: FOOTBALL_DB_URL env)")
 
 
@@ -495,7 +489,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="scraper",
         description="Bilingual (EN/AR) football scraper: goal.com EN + AR -> PostgreSQL",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__.split("Examples")[1] if "Examples" in __doc__ else None,
+        epilog=__doc__,
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     sub = parser.add_subparsers(dest="command", required=True)

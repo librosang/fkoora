@@ -2,7 +2,7 @@
 
 Every write is idempotent (INSERT ... ON CONFLICT ... DO UPDATE), so re-scraping
 a date or a match never creates duplicates - it just refreshes the data and
-fills in previously-missing columns (e.g. Arabic names from kooora).
+fills in previously-missing columns (e.g. Arabic names from goal.com AR).
 """
 
 from __future__ import annotations

@@ -856,7 +856,7 @@ def _scrape_listing_dates(dates: List[str], arabic: bool = True) -> None:
     try:
         for d in dates:
             try:
-                scrape_date_listings(db, d, arabic=arabic, kooora=False)
+                scrape_date_listings(db, d, arabic=arabic)
             except Exception as exc:  # noqa: BLE001
                 log.warning("listing scrape failed for %s: %s", d, exc)
         # matches observed finishing during this scrape -> standings refresh
@@ -1305,7 +1305,7 @@ def run_scheduler() -> None:
                     last_ar_today = now
                 db = Database(API_DB_URL)
                 try:
-                    scrape_date_listings(db, today, arabic=ar_due, kooora=False)
+                    scrape_date_listings(db, today, arabic=ar_due)
                     _note_finished_competitions(db)
                 finally:
                     db.close()

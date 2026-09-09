@@ -1,6 +1,6 @@
 """HTTP client with rate limiting, retries and __NEXT_DATA__ extraction.
 
-Both goal.com and kooora.com are Next.js apps that embed the full page
+goal.com is a Next.js app that embeds the full page
 payload as JSON inside <script id="__NEXT_DATA__">. Fetching plain HTML and
 parsing that script gives us clean structured data with zero browser
 automation.

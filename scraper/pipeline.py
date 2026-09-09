@@ -8,8 +8,6 @@ Flow for one date:
   3. (optional) match details, bilingual:
        -> EN detail page: lineups, events, stats, scores, referee, season
        -> AR detail page: Arabic player / manager / venue names (merged by ID)
-
-kooora.com remains available as an extra Arabic fallback (--kooora flag).
 """
 
 from __future__ import annotations
@@ -25,7 +23,6 @@ from .db.database import Database
 from .major import is_major_competition
 from .parsers import competition as competition_parser
 from .parsers import goal as goal_parser
-from .parsers import kooora as kooora_parser
 
 log = logging.getLogger("scraper.pipeline")
 
@@ -89,8 +86,7 @@ def make_competition_filter(patterns: Optional[List[str]]):
 # ---------------------------------------------------------------------------
 # step 1 + 2: listings (EN + AR)
 # ---------------------------------------------------------------------------
-def scrape_date_listings(db: Database, date: str, arabic: bool = True,
-                         kooora: bool = False) -> int:
+def scrape_date_listings(db: Database, date: str, arabic: bool = True) -> int:
     """Scrape goal.com listings for one date in both languages.
 
     Returns the number of matches stored from the English listing.
@@ -129,19 +125,6 @@ def scrape_date_listings(db: Database, date: str, arabic: bool = True,
         except Exception as exc:  # noqa: BLE001
             # Arabic enrichment is best-effort: keep going if the AR page fails
             log.warning("goal.com AR listing failed for %s: %s", date, exc)
-
-    # ---- optional kooora fallback -------------------------------------------
-    if kooora:
-        try:
-            for row in kooora_parser.fetch_fixtures(date):
-                db.upsert_competition(row["competition"])
-                db.upsert_team(row["home_team"])
-                db.upsert_team(row["away_team"])
-                db.upsert_match_from_listing(row, listed_date=date)
-                db.update_match_venue_ar(row["match_id"], row.get("venue_name_ar"))
-            db.commit()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("kooora fallback failed for %s: %s", date, exc)
 
     db.finish_run(run_id, "ok",
                   competitions_found=n_comps,
@@ -492,7 +475,6 @@ def bootstrap_historical(
     players: bool = True,
     slow: bool = True,
     arabic: bool = True,
-    kooora: bool = False,
     competition_filter=None,
     max_details_per_day: Optional[int] = None,
     max_players_per_day: Optional[int] = None,
@@ -571,7 +553,7 @@ def bootstrap_historical(
                 log.info("[%d/%d] %s: listings already done - skipping", i, len(plan), d)
             else:
                 try:
-                    n = scrape_date_listings(db, d, arabic=arabic, kooora=kooora)
+                    n = scrape_date_listings(db, d, arabic=arabic)
                     summary["listings_done"] += 1
                     _append_progress_line(
                         f"{d}\tlistings\tok\t{n}"
